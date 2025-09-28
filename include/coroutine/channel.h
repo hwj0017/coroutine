@@ -1,10 +1,12 @@
 #pragma once
 
 #include "coroutine.h"
+#include <atomic>
 #include <cassert>
 #include <coroutine>
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <queue>
 
@@ -12,47 +14,112 @@ namespace utils {
 // not thread safe
 // class ChannelBase;
 // TODO
-class ChannelBase {
-public:
-  ChannelBase(size_t max_size, size_t init_size)
-      : empty_size_(max_size - init_size), full_size_(init_size) {}
-  ~ChannelBase() { close(); }
-  void increase() {
-    ++empty_size_;
-    --full_size_;
-  }
-  void decrease() {
-    --empty_size_;
-    ++full_size_;
-  }
-  bool is_empty() const { return full_size_ <= 0; }
-  bool is_full() const { return empty_size_ <= 0; }
-  bool is_closed() const { return is_closed_; }
-  // close the channel
-  void close() {
-    if (is_closed_) {
-      return;
-    }
-    is_closed_ = true;
-    while (!coros_.empty()) {
-      auto coro = coros_.front();
-      coros_.pop();
-      coro.resume();
-    }
-  }
+// class ChannelBase {
+// public:
+//   ChannelBase(size_t max_size, size_t init_size)
+//       : empty_size_(max_size - init_size), full_size_(init_size) {}
+//   ~ChannelBase() { close(); }
+//   void increase() {
+//     ++empty_size_;
+//     --full_size_;
+//   }
+//   void decrease() {
+//     --empty_size_;
+//     ++full_size_;
+//   }
+//   bool is_empty() const { return full_size_ <= 0; }
+//   bool is_full() const { return empty_size_ <= 0; }
+//   bool is_closed() const { return is_closed_; }
+//   // close the channel
+//   void close() {
+//     if (is_closed_.exchange(true)) {
+//       return;
+//     }
+//     // 唤醒所有等待的接收者
+//     while (!recv_queue_.empty()) {
+//       auto &[output, handle] = recv_queue_.front();
+//       *output = T{}; // 默认值
+//       handle.resume();
+//       recv_queue_.pop_front();
+//     }
 
-protected:
-  size_t empty_size_ = 0;
-  size_t full_size_ = 0;
-  bool is_closed_ = false;
-  // await pop or push
-  std::queue<Coroutine> coros_;
-};
+//     // 唤醒所有等待的发送者
+//     while (!send_queue_.empty()) {
+//       auto &[value, handle] = send_queue_.front();
+//       handle.resume();
+//       send_queue_.pop_front();
+//     }
+//   }
+
+// protected:
+//   std::atomic<bool> is_closed_ = false;
+//   std::queue<Coroutine> recv_queue_;
+//   std::queue<Coroutine> send_queue_;
+// };
 
 // channel<T> is a bounded channel that can hold T type elements.
-template <typename T = void> class Channel : public ChannelBase {
+template <typename T = void> class Channel {
 public:
-  Channel(size_t max_size) : ChannelBase(max_size, 0) {}
+  Channel(size_t capacity = 0) : capacity_(capacity) {}
+  // 发送操作
+  struct SendAwaiter {
+    Channel &channel;
+    T &value;
+
+    bool await_ready() const noexcept {
+      std::lock_guard lock(channel.mutex_);
+      return channel->try_send(value);
+    }
+
+    bool await_suspend(
+        std::coroutine_handle<Coroutine::promise_type> handle) noexcept {
+      std::lock_guard lock(channel->mutex_);
+      if (channel->closed_)
+        return false;
+      // 加入发送等待队列
+      channel->send_queue_.push_back({std::move(value), handle});
+      return true;
+    }
+
+    bool await_resume() const {
+      std::lock_guard lock(channel->mutex_);
+      if (channel->closed_) {
+        return false;
+      }
+      return true;
+    }
+  };
+
+  // 接收操作
+  struct RecvAwaiter {
+    Channel &channel;
+    T &value;
+
+    bool await_ready() const noexcept {
+      std::lock_guard lock(channel->mutex_);
+      return channel->try_recv(value);
+    }
+
+    bool await_suspend(
+        std::coroutine_handle<Coroutine::promise_type> handle) noexcept {
+      std::lock_guard lock(channel->mutex_);
+      if (channel->closed_) {
+        return false;
+      }
+
+      // 加入接收等待队列
+      channel->recv_queue_.push_back({value, handle});
+      return true;
+    }
+
+    bool await_resume() const {
+      std::lock_guard lock(channel->mutex_);
+      if (channel->closed_ && channel->buffer_.empty()) {
+        throw std::runtime_error("receive on closed channel");
+      }
+      return std::move(*output);
+    }
+  };
   // TODO
   struct AsyncPop {
     Channel<T> &channel_;
@@ -136,10 +203,77 @@ public:
   }
 
 private:
-  size_t max_size_;
-  std::queue<T> resources_;
-  friend struct AsyncPop;
-  friend struct AsyncPush;
+  struct SendRequest {
+    T &value;
+    Coroutine coro;
+  };
+
+  struct RecvRequest {
+    T &value;
+    Coroutine coro;
+  };
+
+  // 尝试发送（内部使用）
+  bool try_send(T &value) {
+    if (is_closed_)
+      return false;
+
+    // 尝试直接传递给等待的接收者
+    if (!recv_queue_.empty()) {
+      auto &[output, handle] = recv_queue_.front();
+      *output = std::move(value);
+      recv_queue_.pop_front();
+      handle.resume();
+      return true;
+    }
+
+    // 如果有缓冲区空间
+    if (buffer_.size() < capacity_) {
+      buffer_.push_back(std::move(value));
+      return true;
+    }
+
+    return false;
+  }
+
+  // 尝试接收（内部使用）
+  bool try_recv(T &value) {
+    // 尝试从缓冲区获取
+    if (!buffer_.empty()) {
+      *output = std::move(buffer_.front());
+      buffer_.pop_front();
+
+      // 如果有等待的发送者，唤醒一个
+      if (!send_queue_.empty()) {
+        auto &[value, handle] = send_queue_.front();
+        buffer_.push_back(std::move(value));
+        send_queue_.pop_front();
+        handle.resume();
+      }
+      return true;
+    }
+
+    // 尝试从等待的发送者获取
+    if (!send_queue_.empty()) {
+      auto &[value, handle] = send_queue_.front();
+      *output = std::move(value);
+      send_queue_.pop_front();
+      handle.resume();
+      return true;
+    }
+
+    // 如果已关闭且缓冲区为空
+    if (closed_) {
+      return false;
+    }
+
+    return false;
+  }
+  size_t capacity_ = 0;
+  std::mutex mutex_{};
+  std::queue<T> resources_{};
+  std::deque<SendRequest> send_queue_;
+  std::deque<RecvRequest> recv_queue_;
 };
 template <> class Channel<void> : public ChannelBase {
 public:
