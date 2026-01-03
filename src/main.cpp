@@ -1,18 +1,20 @@
 #include "coroutine/main.h"
-#include "schedulerinterface.h"
+#include "schedule.h"
+#include <cassert>
 #include <iostream>
-#include <memory>
-
-auto listen_main() -> utils::Coroutine
+namespace utils
+{
+auto listen_main() -> utils::Coroutine<>
 {
     co_await utils::main_coro();
     std::cout << "main coroutine finished" << std::endl;
     std::exit(0);
 }
+} // namespace utils
 
 int main()
 {
-    listen_main()();
-    utils::SchedulerInterface::instance().schedule();
+    utils::co_spawn(utils::listen_main());
+    utils::schedule();
     return 0;
 }

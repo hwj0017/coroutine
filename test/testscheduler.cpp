@@ -1,27 +1,34 @@
 #include "coroutine/channel.h"
 #include "coroutine/main.h"
+#include <atomic>
+#include <cstddef>
 #include <iostream>
 #include <mutex>
 
-std::mutex mtx;
-auto funcA(int i, utils::Channel<>& c) -> utils::Coroutine
+std::atomic<size_t> counter{0};
+auto funcA(int i, utils::Channel<>& c) -> utils::Coroutine<>
 {
-
     std::cout << "funcA " + std::to_string(i) + "\n";
     co_await c.send();
+    counter++;
     co_return;
 }
-auto utils::main_coro() -> utils::Coroutine
+auto utils::main_coro() -> utils::Coroutine<>
 {
     Channel<> c(1000);
-    for (int i = 0; i < 1000; ++i)
+    for (int i = 0; i < 1; ++i)
     {
-        funcA(i, c)();
+        co_spawn(funcA(i, c));
     }
-    for (int i = 0; i < 1000; ++i)
+    release();
+    for (int i = 0; i < 1; ++i)
     {
         co_await c.recv();
         std::cout << "recv " + std::to_string(i) + "\n";
+        if (i == 55)
+        {
+            co_yield {};
+        }
     }
     co_return;
 }

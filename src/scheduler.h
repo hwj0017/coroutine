@@ -1,144 +1,79 @@
 #pragma once
-
 #include "concurrentdeque.h"
-#include "coroutine/channel.h"
-#include "coroutine/coroutine.h"
+#include "coroutine/handle.h"
+#include "iocontext.h"
 #include "randomer.h"
-#include "schedulerinterface.h"
 #include <atomic>
 #include <cassert>
-#include <condition_variable>
+#include <coroutine>
 #include <cstddef>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <queue>
-#include <random>
+#include <span>
+#include <sys/eventfd.h>
 #include <thread>
 #include <unistd.h>
-#include <utility>
 #include <vector>
 
 namespace utils
 {
-
 class Machine;
-// Processor (P)
-class Processor
+class Processor;
+class Scheduler
 {
   public:
-    explicit Processor() : id_(next_id_++) {}
-
-    ~Processor() {}
-    auto id() const { return id_; }
-    bool add_coroutine(Coroutine&& coro);
-    bool add_coroutine(std::vector<Coroutine>&& coros);
-    auto get_coroutine() -> Coroutine;
-    auto exchange_run_next(Coroutine coro) -> Coroutine { return std::exchange(run_next_, coro); }
-    void set_machine(Machine* m) { machine_ = m; }
-    auto get_half_coroutines() -> std::vector<Coroutine> { return coros_.pop_back(capacity / 2); }
-    auto steal_coroutine() -> std::vector<Coroutine>;
-
-    auto spinning() const { return spinning_; }
-    void set_spinning(bool sp) { spinning_ = sp; }
-    constexpr static size_t capacity = 1 << 8;
+    Scheduler();
+    ~Scheduler() = default;
+    void co_spawn(Handle coro, bool yield = false);
+    void schedule();
+    void release();
+    auto get_io_context() -> IOContext*;
+    auto& instanse()
+    {
+        static Scheduler* scheduler = new Scheduler();
+        return *scheduler;
+    }
+    static const int max_procs = 1;
 
   private:
-    int id_;
-    Coroutine run_next_{};
-    WorkStealingDeque<Coroutine> coros_{capacity};
-    Machine* machine_{nullptr};
-    // 是否自旋
-    bool spinning_{false};
-    // 不保证线程安全
-    static std::atomic<int> next_id_;
-};
-
-inline std::atomic<int> Processor::next_id_{0};
-
-class Machine
-{
-  public:
-    explicit Machine() : id_(next_id_++) {}
-
-    ~Machine()
-    {
-        if (id_ > 0 && thread_.joinable())
-        {
-            thread_.join();
-        }
-    }
-
-    void start(std::function<void()> func)
-    {
-        if (id_ > 0)
-        {
-            thread_ = std::thread(func);
-        }
-        else
-        {
-            func();
-        }
-    }
-
-    void resume()
-    {
-        ready_.store(true);
-        ready_.notify_one();
-    }
-    void sleep()
-    {
-        ready_.store(false);
-        ready_.wait(true);
-    }
-    auto id() const { return id_; }
-
-    auto started() const { return started_; }
-    auto processor() const { return processor_; }
-    void set_processor(Processor* p) { processor_ = p; }
-
-  private:
-    // id = 0为主线程
-    int id_;
-    std::thread thread_;
-    Processor* processor_{nullptr};
-    std::atomic<bool> ready_{false};
-    bool started_{false};
-
-    // 不保证线程安全
-    static std::atomic<int> next_id_;
-};
-
-inline std::atomic<int> Machine::next_id_{0};
-
-class Scheduler : public SchedulerInterface
-{
-  public:
-    Scheduler(int max_procs, int max_machines);
-    ~Scheduler();
-    void add_coroutine(Coroutine& coro) override;
-    void schedule() override;
-    static const int max_procs = 16;
-    static const int max_machines = 16;
-
-  private:
+    void test();
     // M执行循环
     void machine_func(Machine* m);
-    void notify();
-    auto get_global_coroutine() -> std::vector<Coroutine>;
-    void add_global_coroutine(std::vector<Coroutine>&& coros);
-    void add_global_coroutine(Coroutine&& coro);
-    auto get_coroutine(Processor* p) -> Coroutine;
-    auto stopped() { return stopped_.load(); }
-    auto get_idle_processor() -> Processor*;
+    void resume_processor(Processor* p = nullptr);
+    void need_spinning();
+    auto get_coro() -> Handle;
+    // 将就绪协程加入p
+    void add_coro_to_processor(std::span<Handle> coros, Processor* processor);
+    auto get_coro_from_processor(Processor* processor) -> Handle;
+    auto get_coro_with_spinning(Processor* processor) -> Handle;
+    auto get_global_coroutine(size_t max_count) -> std::vector<Handle>;
+    void add_global_coroutine(std::span<Handle> coros);
+    auto get_idle_processor() -> Processor*
+    {
+        if (idle_processors_.empty())
+        {
+            return nullptr;
+        }
+        auto processor = idle_processors_.front();
+        idle_processors_.pop();
+        idle_processor_count_.fetch_sub(1);
+        return processor;
+    }
+    void add_idle_processor(Processor* p)
+    {
+        idle_processors_.push(p);
+        idle_processor_count_.fetch_add(1);
+    }
     auto get_idle_machine() -> Machine*;
-    void add_idle_processor(Processor* p);
     void add_idle_machine(Machine* m);
-    auto steal_coroutine() -> std::vector<Coroutine>;
-
-    const int max_machines_;
-    const int max_procs_;
+    auto steal_coroutine(Processor* p) -> std::vector<Handle>;
+    void start_processor(Processor* p);
+    void sleep();
+    void wake(Machine* m);
+    void wake_from_polling(Processor* p);
+    bool can_spinning();
     // 全部P
     const std::vector<std::unique_ptr<Processor>> processors_;
     // 全部M
@@ -147,22 +82,26 @@ class Scheduler : public SchedulerInterface
     std::unique_ptr<Machine> main_machine_{std::make_unique<Machine>()};
 
     // 全局队列
-    std::queue<Coroutine> global_coros_{};
-    std::atomic<int> global_coros_count_{0};
+    std::queue<Handle> global_coros_{};
+    std::mutex global_coros_mtx_{};
 
     // 空闲P
     std::queue<Processor*> idle_processors_{};
     std::atomic<int> idle_processor_count_{0};
     // 空闲M
     std::queue<Machine*> idle_machines_{};
-    std::atomic<int> idle_machine_count_{0};
-
     // 全局锁
     std::mutex global_mtx_{};
-    // 停止信号
-    std::atomic<bool> stopped_{true};
-    // 自旋M
-    std::atomic<int> spinning_machines_count_{0};
+
+    // 一些原子变量加快访问速度
+    // polling P 掩码
+    std::atomic_uint32_t polling_processor_{0};
+    // Running P 掩码
+    std::atomic<uint32_t> running_processor_{0};
+    // 自旋P
+    std::atomic<int> spinning_processors_count_{0};
+    std::atomic<bool> need_spinning_{false};
+    std::atomic<bool> waiting_spining_{false};
 
     static auto create_processors(size_t n) -> std::vector<std::unique_ptr<Processor>>
     {
@@ -170,7 +109,7 @@ class Scheduler : public SchedulerInterface
         procs.reserve(n);
         for (size_t i = 0; i < n; ++i)
         {
-            procs.push_back(std::make_unique<Processor>());
+            procs.push_back(std::make_unique<Processor>(i, max_local_queue_size));
         }
         return procs;
     }
@@ -178,10 +117,78 @@ class Scheduler : public SchedulerInterface
     static thread_local Randomer randomer_;
 
     // p本地队列最大任务
-    static const int max_local_queue_size = 256;
+    static constexpr size_t max_local_queue_size = 256;
     // 最大自旋回合
-    static const int max_spinning_epoch = 10;
+    static constexpr size_t max_spinning_epoch = 10;
 };
+
+// Processor (P)
+class Processor
+{
+  public:
+    enum class State
+    {
+        IDLE,
+        RUNNING,
+        SPINNING,
+        WAITINGSPINNING,
+        POLLING,
+        NOTFOUND,
+    };
+    explicit Processor(size_t id, size_t capacity) : id(id), coros(capacity) {}
+
+    ~Processor() {}
+    size_t id;
+    std::atomic<Handle> run_next{};
+    IOContext iocontext{};
+    WorkStealingDeque<Handle> coros;
+    // 是否自旋
+    State state{State::IDLE};
+    eventfd_t eventfd{0};
+};
+
+class Machine
+{
+  public:
+    explicit Machine() = default;
+
+    ~Machine()
+    {
+        if (thread.joinable())
+        {
+            thread.join();
+        }
+    }
+
+  public:
+    Processor* processor{nullptr};
+
+  public:
+    void start(std::function<void()> func)
+    {
+        ready.store(true);
+        thread = std::thread(func);
+    }
+
+    std::atomic<bool> ready{false};
+    std::thread thread{};
+};
+
 inline thread_local Machine* Scheduler::current_machine_{nullptr};
 inline thread_local Randomer Scheduler::randomer_{};
+
+inline Scheduler::Scheduler() : processors_(create_processors(max_procs))
+{
+    assert(max_procs >= 1);
+    main_machine_->processor = processors_[0].get();
+    for (int i = 1; i < processors_.size(); ++i)
+    {
+        idle_processors_.push(processors_[i].get());
+    }
+    idle_processor_count_.store(processors_.size() - 1);
+    // 第一个协程不会needspinning
+    spinning_processors_count_.store(1);
+}
+
+inline Scheduler* scheduler = nullptr;
 } // namespace utils

@@ -1,24 +1,53 @@
 #pragma once
 #include "coroutine/coroutine.h"
-#include "schedulerinterface.h"
+#include "coroutine/handle.h"
+#include "iocontext.h"
+#include <atomic>
+#include <cstddef>
 #include <queue>
+#include <thread>
+#include <vector>
 namespace utils
 {
-class SimpleScheduler : public SchedulerInterface
+class SimpleScheduler
 {
   public:
     SimpleScheduler() = default;
-    ~SimpleScheduler() override = default;
-    void add_coroutine(Coroutine& coro) override { coros_.push(std::move(coro)); }
-    void schedule() override
+    ~SimpleScheduler() = default;
+    void co_spawn(Handle coro, bool yield = false) { coros_.push(coro); }
+    void co_spawn(std::vector<Handle>&& coro) {}
+    auto& get_io_context() { return iocontext_; }
+    void schedule()
     {
-        while (!is_stopped_ && !coros_.empty())
+        constexpr size_t poll_interval = 128;
+        while (true)
         {
-            auto coro = std::move(coros_.front());
-            coros_.pop();
-            coro.resume();
+            size_t resume_count = 0;
+            while (!is_stopped_ && !coros_.empty())
+            {
+                auto coro = coros_.front();
+                coros_.pop();
+                coro.resume();
+                if (iocontext_.has_work() && ++resume_count >= poll_interval)
+                {
+
+                    if (auto coros = iocontext_.poll(false); !coros.empty())
+                    {
+                        co_spawn(std::move(coros));
+                    }
+                    resume_count = 0;
+                }
+            }
+            if (iocontext_.has_work())
+            {
+                if (auto coros = iocontext_.poll(true); !coros.empty())
+                {
+                    co_spawn(std::move(coros));
+                }
+            }
         }
     }
+    void release() {}
     static SimpleScheduler& instance()
     {
         static SimpleScheduler scheduler;
@@ -26,8 +55,9 @@ class SimpleScheduler : public SchedulerInterface
     }
 
   private:
-    std::queue<Coroutine> coros_;
-    bool is_stopped_ = false;
+    std::queue<Handle> coros_;
+    std::atomic<bool> is_stopped_ = false;
+    IOContext iocontext_;
 };
 
 } // namespace utils

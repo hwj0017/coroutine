@@ -1,351 +1,496 @@
 #include "scheduler.h"
-#include "coroutine/coroutine.h"
-#include <algorithm>
-#include <any>
 #include <atomic>
 #include <cassert>
-#include <concepts>
-#include <cstddef>
-#include <cstdlib>
 #include <iostream>
-#include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
-#include <utility>
-#include <vector>
 namespace utils
 {
-Scheduler::Scheduler(int max_procs, int max_machines)
-    : max_procs_(max_procs), max_machines_(max_machines), processors_(create_processors(max_procs))
-{
-    assert(max_procs_ >= 1 && max_machines_ >= max_procs_);
-    current_machine_ = main_machine_.get();
-    main_machine_->set_processor(processors_[0].get());
-    {
-        std::lock_guard<std::mutex> lock(global_mtx_);
-        for (int i = 1; i < processors_.size(); ++i)
-        {
-            idle_processors_.push(processors_[i].get());
-        }
-    }
-    idle_processor_count_ = processors_.size() - 1;
-}
-Scheduler::~Scheduler()
-{
-    if (stopped_.exchange(true))
-    {
-        return;
-    }
-    for (auto& machine : machines_)
-    {
-        machine->resume();
-    }
-}
 
 // 开始运行
 void Scheduler::schedule()
 {
-    if (!stopped_.exchange(false))
-    {
-        return;
-    }
-    // 启动主M
-    main_machine_->start([this, machine = main_machine_.get()] { machine_func(machine); });
+    // 启动主M,去除spinning
+    spinning_processors_count_.store(0);
+    main_machine_->processor->state = Processor::State::RUNNING;
+    running_processor_.fetch_or(1 << main_machine_->processor->id);
+    machine_func(main_machine_.get());
 }
 
-void Scheduler::add_coroutine(Coroutine& coro)
+void Scheduler::co_spawn(Handle coro, bool yield)
 {
-    bool need_notify = false;
     // 获取当前P
-    if (current_machine_ && current_machine_->processor())
+    if (current_machine_ && current_machine_->processor && !yield)
     {
         // 优先放入当前P的
-        auto processor = current_machine_->processor();
-        coro = processor->exchange_run_next(coro);
-        if (coro)
-        {
-            need_notify = true;
-            if (!processor->add_coroutine(std::move(coro)))
-            {
-                auto coros = processor->get_half_coroutines();
-                coros.push_back(std::move(coro));
-                std::lock_guard<std::mutex> lock(global_mtx_);
-                add_global_coroutine(std::move(coros));
-            }
-        }
+        add_coro_to_processor({&coro, 1}, current_machine_->processor);
     }
     else
     {
-        need_notify = true;
-        std::lock_guard<std::mutex> lock(global_mtx_);
-        add_global_coroutine(std::move(coro));
-    }
-    if (need_notify)
-    {
-        notify();
-    }
-}
-
-void Scheduler::notify()
-{
-    if (idle_processor_count_.load() == 0)
-    {
-        return;
+        add_global_coroutine({&coro, 1});
     }
     int expected = 0;
-    if (spinning_machines_count_.load() != 0 || !spinning_machines_count_.compare_exchange_strong(expected, 1))
+    if (spinning_processors_count_.load() > 0 || !spinning_processors_count_.compare_exchange_strong(expected, 1))
     {
         return;
     }
-
-    Processor* resumed_processor = nullptr;
-    Machine* resumed_machine = nullptr;
-
-    {
-        std::lock_guard<std::mutex> lock(global_mtx_);
-        if (resumed_processor = get_idle_processor(); !resumed_processor)
-        {
-            return;
-        }
-        if (resumed_machine = get_idle_machine(); !resumed_machine)
-        {
-            add_idle_processor(resumed_processor);
-            return;
-        }
-    }
-
-    resumed_processor->set_spinning(true);
-    resumed_machine->set_processor(resumed_processor);
-    resumed_machine->resume();
+    need_spinning();
 }
 
 void Scheduler::machine_func(Machine* machine)
 {
     current_machine_ = machine;
-    while (!stopped())
+    while (true)
     {
-        if (!current_machine_->processor())
+        auto coro = get_coro();
+        assert(coro);
+        std::cout << "Handle " + std::to_string(promise(coro).get_id()) + " resume in processor " +
+                         std::to_string(machine->processor->id) + "\n";
+        coro.resume();
+    }
+}
+
+void Scheduler::test()
+{
+    auto p = current_machine_->processor;
+    std::cout << "get_coro_from_processor run\n";
+    if (p->iocontext.has_work())
+    {
+        auto coros = p->iocontext.poll(true);
+        std::cout << "get_coro_from_processor io\n";
+        add_coro_to_processor({coros}, p);
+    }
+}
+auto Scheduler::get_coro() -> Handle
+{
+    // 执行完协程需要判断是否为空
+    Processor* processor = current_machine_->processor;
+    if (!processor)
+    {
+        sleep();
+    }
+    assert(processor);
+
+    while (true)
+    {
+        switch (processor->state)
         {
-            current_machine_->sleep();
-        }
-        else
-        {
-            auto coro = get_coroutine(current_machine_->processor());
-            if (coro)
+        case Processor::State::RUNNING: {
+            if (auto coro = get_coro_from_processor(processor); coro)
             {
-                std::cout << " resume " + std::to_string(coro.get_id()) + " machine " +
-                                 std::to_string(current_machine_->id()) + " processor " +
-                                 std::to_string(current_machine_->processor()->id()) + "\n";
-                coro.resume();
-                // 执行任务中可能解绑P
+                return coro;
+            }
+            // 从掩码中删除
+            running_processor_.fetch_and(~(1 << processor->id));
+
+            if (can_spinning())
+            {
+                processor->state = Processor::State::SPINNING;
             }
             else
             {
-                std::lock_guard<std::mutex> lock(global_mtx_);
-                add_idle_processor(current_machine_->processor());
-                add_idle_machine(current_machine_);
-                current_machine_->set_processor(nullptr);
+                processor->state = Processor::State::NOTFOUND;
             }
+            break;
+        }
+        case Processor::State::SPINNING: {
+            Handle coro = get_coro_with_spinning(processor);
+            bool last_spinning = (spinning_processors_count_.fetch_sub(1) == 1);
+            if (!coro && last_spinning)
+            {
+                // 如果是最后一个，需要在检查一次（全局队列）
+                coro = get_coro_with_spinning(processor);
+            }
+
+            if (coro)
+            {
+                processor->state = Processor::State::RUNNING;
+                running_processor_.fetch_or(1 << processor->id);
+                return coro;
+            }
+            processor->state = Processor::State::NOTFOUND;
+            break;
+        }
+        case Processor::State::NOTFOUND: {
+            if (processor->iocontext.has_work())
+            {
+                processor->state = Processor::State::POLLING;
+            }
+            else if (!waiting_spining_.exchange(true))
+            {
+                processor->state = Processor::State::WAITINGSPINNING;
+            }
+            else
+            {
+                processor->state = Processor::State::IDLE;
+            }
+            break;
+        }
+        case Processor::State::WAITINGSPINNING: {
+            // 等待自旋
+            need_spinning_.wait(false);
+            waiting_spining_.store(false);
+            if (can_spinning())
+            {
+                processor->state = Processor::State::SPINNING;
+            }
+            else
+            {
+                processor->state = Processor::State::NOTFOUND;
+            }
+            break;
+        }
+        case Processor::State::POLLING: {
+            // 阻塞监听io
+            polling_processor_.fetch_or(1 << processor->id);
+            // 设置掩码后需再次考虑need_spinning_, 防止所有P同时进入Polling且得不到唤醒
+            if (need_spinning_.exchange(false))
+            {
+                processor->state = Processor::State::SPINNING;
+                polling_processor_.fetch_and(~(1 << processor->id));
+                break;
+            }
+            auto coros = processor->iocontext.poll(true);
+            polling_processor_.fetch_and(~(1 << processor->id));
+            if (auto it = coros.begin(); it != coros.end())
+            {
+                auto coro = *it;
+                ++it;
+                add_coro_to_processor({it, coros.end()}, processor);
+                processor->state = Processor::State::RUNNING;
+                running_processor_.fetch_or(1 << processor->id);
+                return coro;
+            }
+            if (can_spinning())
+            {
+                processor->state = Processor::State::SPINNING;
+            }
+            else
+            {
+                processor->state = Processor::State::NOTFOUND;
+            }
+            break;
+        }
+        case Processor::State::IDLE:
+            // 空闲状态，休眠
+            sleep();
+            // 唤醒后P可能会改变,由唤醒者设置状态
+            assert(current_machine_->processor);
+            processor = current_machine_->processor;
         }
     }
 }
-
-auto Scheduler::get_coroutine(Processor* processor) -> Coroutine
+bool Scheduler::can_spinning()
 {
-
-    Coroutine coro;
-    if (!processor->spinning())
-    { // 从p获取任务
-        if (coro = processor->get_coroutine(); coro)
+    // 先考虑need_spinning_
+    if (need_spinning_.exchange(false))
+    {
+        return true;
+    }
+    // 考虑自旋数
+    else if (auto count = spinning_processors_count_.load(); 2 * count <= idle_processor_count_.load())
+    {
+        // 自旋
+        spinning_processors_count_.fetch_add(1);
+        return true;
+    }
+    return false;
+}
+void Scheduler::release()
+{
+    if (!current_machine_ && !current_machine_->processor)
+    {
+        return;
+    }
+    auto processor = current_machine_->processor;
+    current_machine_->processor = nullptr;
+    // 判断是否有任务
+    if (!processor->run_next.load() && processor->coros.empty())
+    {
+        // 是否需要自旋
+        if (need_spinning_.exchange(false))
         {
-            return coro;
+            processor->state = Processor::State::SPINNING;
         }
-        // 开始自旋
-        if (auto count = spinning_machines_count_.load();
-            count + 1 <= (max_procs_ - idle_processor_count_.load()) / 2 &&
-            spinning_machines_count_.compare_exchange_strong(count, count + 1))
+        // 是否需要等待自旋
+        else if (!waiting_spining_.exchange(true))
         {
-            processor->set_spinning(true);
+            processor->state = Processor::State::WAITINGSPINNING;
         }
         else
         {
-            return {};
-        }
-    }
-    std::vector<Coroutine> coros;
-    int spinning_epoch = 0;
-    while (!stopped() && spinning_epoch < max_spinning_epoch)
-    {
-        // 从全局队列获取任务
-        {
             std::lock_guard<std::mutex> lock(global_mtx_);
-            coros = get_global_coroutine();
+            add_idle_processor(processor);
+            return;
         }
-        if (!coros.empty())
-        {
-            break;
-        }
-
-        int rand_idx = randomer_.random(0, max_procs_);
-        for (int i = 0; i < max_procs_; i++)
-        {
-            if (processors_[i + rand_idx].get() == processor)
-            {
-                continue;
-            }
-            if (coros = processors_[i]->steal_coroutine(); !coros.empty())
-            {
-                std::string debug = " ";
-                for (auto& c : coros)
-                {
-                    debug += " " + std::to_string(c.get_id());
-                }
-                std::cout << " steal " + std::to_string(coros.size()) + debug + "\n";
-                break;
-            }
-        }
-        if (!coros.empty())
-        {
-            break;
-        }
-        ++spinning_epoch;
-        std::this_thread::yield();
     }
-
-    processor->set_spinning(false);
-    spinning_machines_count_.fetch_sub(1);
-
-    if (!coros.empty())
-    {
-        coro = std::move(coros.back());
-        coros.pop_back();
-        processor->add_coroutine(std::move(coros));
-    }
-    return coro;
+    resume_processor(processor);
 }
 
-// void Scheduler::release_processor()
-// {
-//     bool need_notify = false;
-//     auto id = std::this_thread::get_id();
-//     {
-//         std::lock_guard<std::mutex> lock(global_mtx_);
-//         if (auto it = machine_map_.find(id); it != machine_map_.end())
-//         {
-//             if (auto processor = std::move(it->second->processor()); processor)
-//             {
-//                 if (processor->has_coroutine() || !global_coros_.empty())
-//                 {
-//                     pending_processors_.push(std::move(processor));
-//                     need_notify = true;
-//                 }
-//                 else
-//                 {
-//                     idle_processors_.push(std::move(processor));
-//                 }
-//             }
-//         }
-//     }
-//     if (need_notify)
-//     {
-//         if (idle_machine_count_.load() > 0)
-//         {
-//             global_cv_.notify_one();
-//         }
-//         else if (machine_count_.fetch_add(1) < max_machines_)
-//         {
-//             // 所有M均在运行，新建M
-//             machines_.push_back(std::make_unique<Machine>());
-//             machines_.back()->start([this, machine = machines_.back().get()] { machineFunc(machine); });
-//         }
-//         else
-//         {
-//             machine_count_.fetch_sub(1);
-//         }
-//     }
-// }
-
-// void Scheduler::bind_processor() {}
-void Scheduler::add_global_coroutine(Coroutine&& coro) { global_coros_.push(std::move(coro)); }
-void Scheduler::add_global_coroutine(std::vector<Coroutine>&& coros)
+void Scheduler::need_spinning()
 {
+    // need_spinning配合waiting_spining保证不会遗漏任务，不会存在所有P同时进入空闲状态的极端情况
+    need_spinning_.store(true);
+    // 以下将尽量保证至少有一个P处于自旋状态
+    // 如果等待自旋P，直接唤醒，哪怕已经唤醒
+    if (waiting_spining_.load())
+    {
+        need_spinning_.notify_one();
+        return;
+    }
+    // 将空闲P置为自旋状态并运行
+    if (idle_processor_count_.load() > 0)
+    {
+        Processor* idle_processor = nullptr;
+        Machine* idle_machine = nullptr;
+        bool is_new_machine = false;
+        {
+            std::lock_guard<std::mutex> lock(global_mtx_);
+            if (!idle_processors_.empty() && need_spinning_.exchange(false))
+            {
+                idle_processor = get_idle_processor();
+                if (idle_machine = get_idle_machine(); !idle_machine)
+                {
+                    machines_.push_back(std::make_unique<Machine>());
+                    idle_machine = machines_.back().get();
+                    is_new_machine = true;
+                }
+            }
+        }
+        if (idle_processor)
+        {
+            idle_processor->state = Processor::State::SPINNING;
+            idle_machine->processor = idle_processor;
+            if (is_new_machine)
+            {
+                idle_machine->start([this, idle_machine] { machine_func(idle_machine); });
+            }
+            else
+            {
+                wake(idle_machine);
+            }
+            return;
+        }
+    }
+    // 唤醒polling中的P
+    // 获取掩码最低位的1
+    auto mask = polling_processor_.load();
+    auto low_1bit = mask & (~mask + 1);
+    auto new_mask = mask & (~low_1bit);
+
+    if (low_1bit && polling_processor_.compare_exchange_strong(mask, new_mask))
+    {
+        // 获取第一个P的索引
+        auto index = __builtin_ctz(low_1bit);
+        wake_from_polling(processors_[index].get());
+    }
+}
+void Scheduler::resume_processor(Processor* processor)
+{
+    Machine* idle_machine = nullptr;
+    bool is_new_machine = false;
+    {
+        std::lock_guard<std::mutex> lock(global_mtx_);
+        if (idle_machine = get_idle_machine(); !idle_machine)
+        {
+            machines_.push_back(std::make_unique<Machine>());
+            idle_machine = machines_.back().get();
+            is_new_machine = true;
+        }
+    }
+    idle_machine->processor = processor;
+    if (is_new_machine)
+    {
+        idle_machine->start([this, idle_machine] { machine_func(idle_machine); });
+    }
+    else
+    {
+        wake(idle_machine);
+    }
+    return;
+}
+
+void Scheduler::add_global_coroutine(std::span<Handle> coros)
+{
+    std::lock_guard<std::mutex> lock(global_coros_mtx_);
     for (auto& coro : coros)
     {
         global_coros_.push(std::move(coro));
     }
 }
 
-auto Scheduler::get_global_coroutine() -> std::vector<Coroutine>
+void Scheduler::add_coro_to_processor(std::span<Handle> coros, Processor* processor)
 {
-    if (global_coros_.empty())
+    if (auto it = coros.begin(); it != coros.end())
     {
-        return {};
+        // 优先放入run_next
+        auto old_run_next = processor->run_next.exchange(*it);
+        if (old_run_next)
+        {
+            *it = old_run_next;
+        }
+        else
+        {
+            ++it;
+        }
+        if (it != coros.end())
+        {
+            auto res = processor->coros.push_back({it, coros.end()});
+            it += res;
+            if (it != coros.end())
+            {
+                add_global_coroutine({it, coros.end()});
+            }
+        }
     }
-    std::vector<Coroutine> coros;
-    size_t max_size = std::min(global_coros_.size() / max_procs_ + 1, Processor::capacity / 2);
-    while (coros.size() < max_size && !global_coros_.empty())
+}
+
+auto Scheduler::get_coro_from_processor(Processor* processor) -> Handle
+{
+    // 优先从run_next获取
+    if (auto coro = processor->run_next.exchange({}); coro)
     {
-        coros.push_back(std::move(global_coros_.front()));
+        return coro;
+    }
+
+    // 需要重试保证本地队列取完
+    while (!processor->coros.empty())
+    {
+        if (auto coro = processor->coros.pop_front(); coro)
+        {
+            return coro;
+        }
+    }
+
+    if (processor->iocontext.has_work())
+    {
+        auto coros = processor->iocontext.poll(false);
+        if (auto it = coros.begin(); it != coros.end())
+        {
+            auto coro = *it;
+            ++it;
+            add_coro_to_processor({it, coros.end()}, processor);
+            return coro;
+        }
+    }
+    return {};
+}
+
+auto Scheduler::get_coro_with_spinning(Processor* processor) -> Handle
+{
+    std::vector<Handle> coros;
+    if (coros = get_global_coroutine(max_local_queue_size / 2); coros.empty())
+    {
+        if (coros = steal_coroutine(processor); coros.empty() && processor->iocontext.has_work())
+        {
+            coros = processor->iocontext.poll(false);
+        }
+    }
+    if (auto it = coros.begin(); it != coros.end())
+    {
+        auto coro = *it;
+        ++it;
+        add_coro_to_processor({it, coros.end()}, processor);
+        return coro;
+    }
+    return {};
+}
+
+auto Scheduler::get_global_coroutine(size_t max_count) -> std::vector<Handle>
+{
+    std::vector<Handle> coros;
+    std::lock_guard<std::mutex> lock(global_coros_mtx_);
+    auto get_coros_size = std::min(std::min(global_coros_.size() / max_procs + 1, global_coros_.size()), max_count);
+    coros.reserve(get_coros_size);
+    for (int i = 0; i < get_coros_size; i++)
+    {
+        coros.push_back(global_coros_.front());
         global_coros_.pop();
     }
     return coros;
 }
 
-auto Scheduler::get_idle_processor() -> Processor*
+auto Scheduler::steal_coroutine(Processor* processor) -> std::vector<Handle>
 {
-    if (idle_processors_.empty())
+    int rand_idx = randomer_.random(0, max_procs);
+    // TODO:多几轮
+    for (int i = 0; i < max_procs; i++)
     {
-        return nullptr;
+        auto steal_processor = processors_[(i + rand_idx) % max_procs].get();
+        // 只窃取正在运行的P
+        if (steal_processor == processor || !(running_processor_.load() & (1 << steal_processor->id)))
+        {
+            continue;
+        }
+        if (auto coros = steal_processor->coros.pop_front_half(); !coros.empty())
+        {
+            std::string debug = " ";
+            for (auto& c : coros)
+            {
+                debug += " " + std::to_string(promise(c).get_id());
+            }
+            std::cout << " steal " + std::to_string(coros.size()) + debug + "\n";
+            return coros;
+        }
     }
-    auto processor = idle_processors_.front();
-    idle_processors_.pop();
-    idle_processor_count_.fetch_sub(1);
-    return processor;
-}
+    for (int i = 0; i < max_procs; i++)
+    {
+        auto steal_processor = processors_[(i + rand_idx) % max_procs].get();
+        if (steal_processor == processor || !(running_processor_.load() & (1 << steal_processor->id)))
+        {
+            continue;
+        }
 
+        if (auto coro = steal_processor->run_next.exchange({}); coro)
+        {
+            return {coro};
+        }
+    }
+    return {};
+}
 auto Scheduler::get_idle_machine() -> Machine*
 {
     if (idle_machines_.empty())
     {
-        if (machines_.size() >= max_machines_)
-        {
-            return nullptr;
-        }
-        machines_.push_back(std::make_unique<Machine>());
-        machines_.back()->start([this, machine = machines_.back().get()] { machine_func(machine); });
-        return machines_.back().get();
+        return nullptr;
     }
     auto machine = idle_machines_.front();
     idle_machines_.pop();
-    idle_machine_count_.fetch_sub(1);
     return machine;
 }
+void Scheduler::add_idle_machine(Machine* m) { idle_machines_.push(m); }
 
-void Scheduler::add_idle_processor(Processor* p)
+void Scheduler::sleep()
 {
-    idle_processors_.push(p);
-    idle_processor_count_.fetch_add(1);
-}
-
-void Scheduler::add_idle_machine(Machine* m)
-{
-    idle_machines_.push(m);
-    idle_machine_count_.fetch_add(1);
-}
-
-bool Processor::add_coroutine(Coroutine&& coro) { return coros_.push_back(std::move(coro)); }
-// 批量添加任务
-bool Processor::add_coroutine(std::vector<Coroutine>&& coros) { return coros_.push_back(coros); }
-auto Processor::get_coroutine() -> Coroutine
-{
-    if (run_next_)
+    assert(current_machine_);
+    // 先设置ready再加锁放入空闲队列
+    current_machine_->ready.store(false);
+    auto processor = current_machine_->processor;
+    current_machine_->processor = nullptr;
     {
-        return std::exchange(run_next_, {});
+        std::lock_guard<std::mutex> lock(global_mtx_);
+        if (processor)
+        {
+            std::cout << "sleep " << processor->id << "\n";
+            add_idle_processor(processor);
+        }
+        add_idle_machine(current_machine_);
     }
-    return coros_.pop_back();
+    current_machine_->ready.wait(false);
 }
 
-auto Processor::steal_coroutine() -> std::vector<Coroutine> { return coros_.pop_front(coros_.size() / 2); }
+void Scheduler::wake(Machine* machine)
+{
+    machine->ready.store(true);
+    machine->ready.notify_one();
+}
+
+void Scheduler::wake_from_polling(Processor* processor) { processor->iocontext.wake(); }
+
+auto Scheduler::get_io_context() -> IOContext*
+{
+    assert(current_machine_ && current_machine_->processor);
+    return &current_machine_->processor->iocontext;
+}
 
 } // namespace utils
