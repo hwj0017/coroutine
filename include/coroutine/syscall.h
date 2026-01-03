@@ -30,8 +30,9 @@ template <typename T> class SysAwaiter : public SysAwaiterBase
     ~SysAwaiter() = default;
     bool await_suspend(Handle handle) noexcept
     {
+        handle_ = handle;
         static_assert(std::is_base_of_v<SysAwaiter<T>, T>);
-        return process(static_cast<T>(this));
+        return process(static_cast<T*>(this));
     }
 };
 

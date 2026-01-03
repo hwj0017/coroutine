@@ -58,7 +58,7 @@ class IOContext
             else
             {
                 auto awaiter = reinterpret_cast<SysAwaiterBase*>(cqe->user_data);
-                auto handle = awaiter->set_value(cqe->user_data);
+                auto handle = awaiter->set_value(cqe->res);
                 coroutines.push_back(handle);
             }
             ++finished_count;
@@ -158,7 +158,7 @@ bool IOContext::process_impl(Awaiter* awaiter)
     else if constexpr (std::is_same_v<DelayAwaiter, Awaiter>)
     {
         awaiter = static_cast<DelayAwaiter*>(awaiter);
-        io_uring_prep_timeout(sqe, &awaiter->ts_, 0, 0);
+        io_uring_prep_timeout(sqe, reinterpret_cast<__kernel_timespec*>(&awaiter->ts_), 0, 0);
     }
     // 先设置请求在设置user_data
     sqe->user_data = reinterpret_cast<uintptr_t>(awaiter);

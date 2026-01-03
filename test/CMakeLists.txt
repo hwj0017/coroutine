@@ -1,4 +1,4 @@
-
+add_subdirectory(net/tcp)
 # add_executable(test_coro)
 # target_sources(test_coro PRIVATE testcoro.cpp)
 # target_include_directories(test_coro PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
@@ -6,15 +6,15 @@
 # target_sources(test_deque PRIVATE testdeque.cpp)
 # target_include_directories(test_deque PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 
-add_executable(test_scheduler)
-target_sources(test_scheduler PRIVATE testscheduler.cpp ../src/main.cpp ../src/scheduler.cpp ../src/all.cpp)
-target_include_directories(test_scheduler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src ../include)
-target_link_libraries(test_scheduler PRIVATE uring)
+# add_executable(test_scheduler)
+# target_sources(test_scheduler PRIVATE testscheduler.cpp ../src/main.cpp ../src/scheduler.cpp ../src/all.cpp)
+# target_include_directories(test_scheduler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src ../include)
+# target_link_libraries(test_scheduler PRIVATE uring)
 
-add_executable(test_simple_scheduler)
-target_sources(test_simple_scheduler PRIVATE testscheduler.cpp ../src/main.cpp ../src/all.cpp)
-target_include_directories(test_simple_scheduler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src ../include)
-target_link_libraries(test_simple_scheduler PRIVATE uring)
+# add_executable(test_simple_scheduler)
+# target_sources(test_simple_scheduler PRIVATE testscheduler.cpp ../src/main.cpp ../src/all.cpp)
+# target_include_directories(test_simple_scheduler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src ../include)
+# target_link_libraries(test_simple_scheduler PRIVATE uring)
 # add_executable(test_io_uring)
 # target_sources(test_io_uring PRIVATE testiouring.cpp)
 # target_link_libraries(test_io_uring PRIVATE uring)
@@ -31,3 +31,5 @@ target_link_libraries(test_simple_scheduler PRIVATE uring)
 # target_sources(test_io PRIVATE testio.cpp ../src/main.cpp ../src/scheduler.cpp ../src/syscall.cpp)
 # target_include_directories(test_io PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ../include)
 # target_link_libraries(test_io PRIVATE uring)
+
+

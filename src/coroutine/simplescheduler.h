@@ -15,7 +15,13 @@ class SimpleScheduler
     SimpleScheduler() = default;
     ~SimpleScheduler() = default;
     void co_spawn(Handle coro, bool yield = false) { coros_.push(coro); }
-    void co_spawn(std::vector<Handle>&& coro) {}
+    void co_spawn(std::vector<Handle>&& coro)
+    {
+        for (auto& coro : coro)
+        {
+            coros_.push(coro);
+        }
+    }
     auto& get_io_context() { return iocontext_; }
     void schedule()
     {
