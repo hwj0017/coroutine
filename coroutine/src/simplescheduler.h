@@ -53,7 +53,6 @@ class SimpleScheduler
             }
         }
     }
-    void release() {}
     static SimpleScheduler& instance()
     {
         static SimpleScheduler scheduler;

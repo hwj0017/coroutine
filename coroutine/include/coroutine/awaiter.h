@@ -5,81 +5,37 @@
 #include <utility>
 namespace utils
 {
-class AwaiterBase
-{
-  public:
-    virtual void ready(AwaiterBase* child) = 0;
-    void set_parent(AwaiterBase* parent) { parent_ = parent; }
-    AwaiterBase* parent_;
-};
-template <typename T> class Awaiter : public AwaiterBase
-{
-  public:
-    using ValueType = T;
-    Awaiter() = default;
-    virtual bool await_ready() = 0;
-    virtual void await_suspend(std::coroutine_handle<> handle) = 0;
-    auto await_resume() -> T { return std::move(value_); }
-
-    auto set_value(T&& value) -> std::coroutine_handle<>
-    {
-        value_ = std::move(value);
-        if (parent_->ready(this))
-        {
-            return handle;
-        }
-    }
-    virtual void cancel() = 0;
-
-  private:
-    ValueType value_;
-    std::coroutine_handle<> handle;
-};
-
+// 1. 先定义基础的 await_suspend 返回值约束
 template <typename T>
-concept IsAwaiter = std::is_base_of_v<utils::Awaiter<typename T::ValueType>, T>;
-// all
-template <IsAwaiter L, IsAwaiter R> class Select
+concept await_suspend_result = std::same_as<T, void> || std::same_as<T, bool> ||
+                               requires(T t) { std::coroutine_handle<>{t}; }; // 检查是否能隐式转为 handle
+
+// 2. 定义核心 Concept
+template <typename T>
+concept cancellable_awaiter = requires(T t, std::coroutine_handle<> h) {
+    // Awaitable 标准接口约束
+    { t.await_ready() } -> std::convertible_to<bool>;
+    { t.await_suspend(h) } -> await_suspend_result;
+    t.await_resume();
+
+    // 取消接口约束：必须拥有 cancel 成员函数
+    { t.cancel() } noexcept;
+};
+template <cancellable_awaiter L, cancellable_awaiter R> class SelectAwaiter
 {
   public:
-    Select(L l, R r) : l_(l), r_(r)
+    SelectAwaiter(L left, R right) : left_(left), right_(right) {}
+    bool await_ready() { return left_.await_ready() && right_.await_ready(); }
+    auto await_resume()
     {
-        l_.set_parent(this);
-        r_.set_parent(this);
+        if (left_.await_resume())
+        {
+            return left_;
+        }
+        return right_;
     }
-    bool ready(AwaiterBase* child)
-    {
-        // 已经准备好了
-        if (ready_.exchange(true))
-        {
-            return false;
-        }
-        if (child == l_)
-        {
-            r_.cancel();
-        }
-        else
-        {
-            l_.cancel();
-        }
-        return true;
-    }
-    bool await_ready() { return l_->await_ready() || r_->await_ready(); }
-    bool await_suspend(std::coroutine_handle<> handle)
-    {
-        if (!l_.await_suspend(handle))
-        {
-            return false;
-        }
-        return r_.await_suspend(handle);
-    }
-    auto await_resume() { return std::make_tuple(l_.await_resume(), r_.await_resume()); }
 
-  private:
-    std::atomic<bool> ready_{false};
-    L l_;
-    R r_;
+    L left_;
+    R right_;
 };
-
-template <typename L, typename R> auto operator|(L l, R r) { return Select<L, R>(l, r); }
 } // namespace utils

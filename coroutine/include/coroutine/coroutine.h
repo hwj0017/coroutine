@@ -67,7 +67,7 @@ class CoroutineBase
     CoroutineBase& operator=(const CoroutineBase&) = default;
     operator bool() { return promise_; }
     auto await_ready() { return false; }
-    bool await_suspend(Handle handle)
+    auto await_suspend(Handle handle)
     {
         handle_ = handle;
         promise_->set_awaiter(this);
@@ -75,8 +75,7 @@ class CoroutineBase
 
         // 先置空
         promise_ = nullptr;
-        co_spawn(self_handle);
-        return true;
+        return self_handle;
     }
     size_t get_id() { return promise_->get_id(); }
 
@@ -140,16 +139,6 @@ template <> class Coroutine<void> : public CoroutineBase
     };
     using promise_type = PromiseType;
     Coroutine(promise_type* promise) : CoroutineBase(promise) {}
-    auto await_ready() { return false; }
-    void await_suspend(Handle handle)
-    {
-        handle_ = handle;
-        promise_->set_awaiter(this);
-        auto self_handle = promise_->get_self_handle();
-
-        promise_ = nullptr;
-        co_spawn(self_handle);
-    }
     void await_resume() {}
     auto set_value() { return handle_; }
 

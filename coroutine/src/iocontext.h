@@ -31,7 +31,7 @@ class IOContext
     }
     auto poll(bool block) -> std::vector<Handle>
     {
-        assert(event_count_ > 1);
+        assert(event_count_ > 0);
         if (block)
         {
             assert(io_uring_submit_and_wait(&ring_, 1) == unsubmitted_count_);
@@ -177,13 +177,4 @@ bool IOContext::process_impl(Awaiter* awaiter)
     return true;
 }
 
-// inline void IOContext::delay(DelayAwaiter& awaiter)
-// {
-//     struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-//     struct __kernel_timespec ts;
-//     ts.tv_sec = awaiter.timeout_;
-//     ts.tv_nsec = (awaiter.timeout_ - ts.tv_sec) * 1e9;
-//     io_uring_prep_timeout(sqe, &ts, 0, 0);
-//     io_uring_submit(&ring_);
-// }
 } // namespace utils

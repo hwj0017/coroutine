@@ -95,7 +95,7 @@ inline void Mutex::unlock()
     }
     if (awaiter)
     {
-        if (auto handle = awaiter->set_value())
+        if (auto handle = awaiter->set_value(); handle)
         {
             co_spawn(handle);
         }
