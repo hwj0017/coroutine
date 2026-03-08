@@ -1,4 +1,5 @@
 #include "coroutine/syscall.h"
+#include <atomic>
 #include <cstddef>
 #include <netinet/in.h>
 #include <span>
@@ -11,6 +12,7 @@ class TcpConnection
   public:
     explicit TcpConnection(int sockfd, sockaddr_in addr);
     ~TcpConnection();
+    auto get_id() const { return id_; }
     // 异步读：读取最多 n 字节
     // 返回实际读取字节数，0 表示对端关闭
     auto read(std::span<char> buffer) -> utils::ReadAwaiter;
@@ -31,7 +33,9 @@ class TcpConnection
     TcpConnection& operator=(const TcpConnection&) = delete;
 
   private:
+    size_t id_;
     int sockfd_;
     sockaddr_in addr_;
+    static std::atomic<size_t> next_id_;
 };
 } // namespace utils

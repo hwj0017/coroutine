@@ -11,7 +11,6 @@
 namespace utils
 {
 class TcpConnection;
-class TcpAcceptor;
 // 用户处理连接的协程函数类型
 // 注意：使用 shared_ptr 保证连接对象在协程中存活
 
@@ -33,9 +32,7 @@ class TcpServer
     auto join() -> std::suspend_always;
 
   private:
-    auto start_impl() -> Coroutine<>;
-    int port_;
-    std::unique_ptr<TcpAcceptor> acceptor_;
-    Handler handler_;
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 } // namespace utils

@@ -4,7 +4,7 @@
 namespace utils
 {
 
-TcpConnection::TcpConnection(int sockfd, sockaddr_in addr) : sockfd_(sockfd), addr_(addr) {}
+TcpConnection::TcpConnection(int sockfd, sockaddr_in addr) : sockfd_(sockfd), addr_(addr), id_(next_id_.fetch_add(1)) {}
 TcpConnection::~TcpConnection()
 {
     if (sockfd_ != -1)

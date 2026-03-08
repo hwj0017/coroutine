@@ -1,6 +1,9 @@
 #pragma once
 
+#include "coroutine/channel.h"
 #include "coroutine/coroutine.h"
+#include "coroutine/mutex.h"
+#include "rpc/common.pb.h"
 #include "rpc/message.h"
 #include <functional>
 
@@ -12,8 +15,6 @@
 
 namespace utils
 {
-class TcpServer;
-class TcpConnection;
 class RpcServer
 {
   public:
@@ -30,19 +31,20 @@ class RpcServer
     template <IsMessage R, IsMessage Arg>
     static auto wrap(const std::function<R(Arg)>& func, std::string&& args) -> std::string;
     void register_service_impl(std::string method, std::function<std::string(std::string)> func);
-    auto handle_rpc_connection(std::shared_ptr<TcpConnection> tcp_conn) -> Coroutine<>;
-    std::unique_ptr<TcpServer> tcp_server_;
-    class ServiceHandler;
-    std::map<std::string, std::function<std::string(std::string)>> services_;
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 template <typename F> void RpcServer::register_service(std::string method, F func)
 {
     register_service_impl(method, [func = std::move(func)](std::string args) { return wrap(func, std::move(args)); });
 }
-template <IsMessage R, IsMessage Arg> auto RpcServer::wrap(R (*func)(Arg), std::string&& arg) -> std::string
+template <IsMessage R, IsMessage Arg> auto RpcServer::wrap(R (*func)(Arg), std::string&& args) -> std::string
 {
-    return wrap(std::function<R(Arg)>(func), std::move(arg));
+    Arg arg;
+    static_cast<Message*>(&arg)->ParseFromString(std::move(args));
+    auto res = func(arg);
+    return static_cast<Message*>(&res)->SerializeAsString();
 }
 
 template <IsMessage R, IsMessage Arg>

@@ -4,6 +4,7 @@
 #include "rpc/common.pb.h"
 #include "tcp/tcpconnection.h"
 #include "tcp/tcpserver.h"
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstdint>
@@ -12,39 +13,37 @@
 #include <string_view>
 namespace utils
 {
-RpcServer::RpcServer(std::string_view listen_ip, uint16_t port)
+struct RpcServer::Impl
 {
-    auto handler = [this](std::shared_ptr<TcpConnection> connection) -> Coroutine<> {
-        return handle_rpc_connection(std::move(connection));
-    };
-    tcp_server_ = std::make_unique<TcpServer>(listen_ip, port, std::move(handler));
-}
-RpcServer::~RpcServer() = default;
-
-void RpcServer::start() { tcp_server_->start(); }
-void RpcServer::register_service_impl(std::string method, std::function<std::string(std::string)> func)
-{
-    services_.emplace(std::move(method), std::move(func));
-}
-
-auto RpcServer::handle_rpc_connection(std::shared_ptr<TcpConnection> connection) -> Coroutine<>
-{
-    constexpr size_t buffer_size = 1024;
-    std::array<char, buffer_size> buffer;
-    while (true)
+    Impl(std::string_view listen_ip, uint16_t port)
+        : tcp_server_(listen_ip, port, [this](std::shared_ptr<TcpConnection> connection) -> Coroutine<> {
+              return handle_rpc_connection(std::move(connection));
+          })
     {
-        auto count = co_await connection->read(buffer);
-        if (count <= 0)
+    }
+    void start() { tcp_server_.start(); }
+    auto handle_rpc_connection(std::shared_ptr<TcpConnection> connection) -> Coroutine<>
+    {
+        constexpr size_t buffer_size = 1024;
+        std::array<char, buffer_size> buffer;
+        while (true)
         {
-            break;
+            auto count = co_await connection->read(buffer);
+            if (count <= 0)
+            {
+                break;
+            }
+            ::rpc::Request request;
+            if (!request.ParseFromArray(buffer.data(), count))
+            {
+                std::cout << "error" << std::endl;
+                continue;
+            }
+            co_spawn(handle_rpc_request(connection, std::move(request)));
         }
-
-        ::rpc::Request request;
-        if (!request.ParseFromArray(buffer.data(), count))
-        {
-            std::cout << "error" << std::endl;
-            continue;
-        }
+    }
+    auto handle_rpc_request(std::shared_ptr<TcpConnection> connection, rpc::Request request) -> Coroutine<>
+    {
         ::rpc::Response response;
         auto it = services_.find(request.method());
         response.set_method(std::move(request.method()));
@@ -53,15 +52,26 @@ auto RpcServer::handle_rpc_connection(std::shared_ptr<TcpConnection> connection)
             response.set_output({});
         }
         response.set_output(it->second(std::move(request.input())));
-        auto required_size = response.ByteSizeLong();
-        if (required_size > buffer_size)
         {
-            std::cout << "error" << std::endl;
-            continue;
+            auto guard = co_await mutex_.guard();
+            co_await connection->write(response.SerializeAsString());
         }
-        std::cout << "send: " << response.SerializeAsString() << std::endl;
-        assert(response.SerializeToArray(buffer.data(), buffer_size));
-        co_await connection->write({buffer.data(), required_size});
     }
+    void register_service_impl(std::string&& method, std::function<std::string(std::string)>&& func)
+    {
+        services_.emplace(std::move(method), std::move(func));
+    }
+    TcpServer tcp_server_;
+    Mutex mutex_;
+    std::unordered_map<std::string, std::function<std::string(std::string)>> services_;
+};
+RpcServer::RpcServer(std::string_view listen_ip, uint16_t port) : impl_(std::make_unique<Impl>(listen_ip, port)) {}
+RpcServer::~RpcServer() = default;
+
+void RpcServer::start() { impl_->start(); }
+void RpcServer::register_service_impl(std::string method, std::function<std::string(std::string)> func)
+{
+    impl_->register_service_impl(std::move(method), std::move(func));
 }
+
 } // namespace utils
