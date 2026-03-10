@@ -1,6 +1,5 @@
 #pragma once
 #include "coroutine/coroutine.h"
-#include "coroutine/handle.h"
 #include "iocontext.h"
 #include <atomic>
 #include <cstddef>
@@ -33,7 +32,7 @@ class SimpleScheduler
             {
                 auto coro = coros_.front();
                 coros_.pop();
-                coro.resume();
+                coro->invoke();
                 if (iocontext_.has_work() && ++resume_count >= poll_interval)
                 {
 

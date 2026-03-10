@@ -1,12 +1,10 @@
 #pragma once
-
+#include "coroutine/channel.h"
 #include "coroutine/coroutine.h"
-#include "rpc/common.pb.h"
+#include "coroutine/icallable.h"
 #include "rpc/message.h"
-#include "tcp/tcpconnector.h"
-#include <array>
+#include "tcp/socket.h"
 #include <cstddef>
-#include <memory>
 #include <string>
 #include <string_view>
 namespace utils
@@ -14,47 +12,91 @@ namespace utils
 class RpcClient
 {
   public:
-    RpcClient(std::string_view host, uint16_t port) : connector_(std::make_unique<TcpConnector>(host, port)) {}
-    template <IsMessage R, IsMessage Arg>
-    auto call(std::string_view method, const Arg& arg, R* reply) -> Coroutine<bool>
-    {
-        if (!is_connected_)
-        {
-            if (auto res = co_await connector_->connect(); res < 0)
-            {
-                co_return false;
-            }
-            is_connected_ = true;
-        }
-        constexpr size_t buffer_size = 1024;
-        std::array<char, buffer_size> buffer;
-        ::rpc::Request request;
-        request.set_method(std::string(method));
-        request.set_input(arg.SerializeAsString());
-        auto request_size = request.ByteSizeLong();
-        if (request_size > buffer_size)
-        {
-            co_return false;
-        }
-        request.SerializeToArray(buffer.data(), buffer_size);
-        auto write_byte = co_await connector_->write({buffer.data(), request_size});
-        if (write_byte != request_size)
-        {
-            co_return false;
-        }
-        auto read_byte = co_await connector_->read(buffer);
-        if (read_byte < 0)
-        {
-            co_return false;
-        }
-        rpc::Response response;
-        response.ParseFromArray(buffer.data(), read_byte);
-        co_return static_cast<Message*>(reply)->ParseFromArray(response.output().data(), response.output().size());
-    }
+    RpcClient(std::string_view host, uint16_t port) : socket_(Socket::create_tcp()) {}
+
+    template <IsMessage R, IsMessage Arg> auto call(std::string method, const Arg& arg, R& reply) -> Coroutine<bool>;
 
   private:
-    std::unique_ptr<TcpConnector> connector_;
-    bool is_connected_ = false;
+    struct RpcRequest
+    {
+        uint64_t sequence_id;
+        std::string method;
+        std::string payload;
+    };
+    struct RpcResponse
+    {
+        std::string payload;
+        bool is_error;
+    };
+    class ReadyAwaiter
+    {
+      public:
+        ReadyAwaiter(RpcClient* client, uint64_t id) : client_(client), id_(id) {}
+        auto await_ready() { return false; }
+        auto await_suspend(std::coroutine_handle<> handle) { return !client_->ready_impl(this); }
+        auto await_resume() const noexcept -> RpcResponse { return std::move(response_); }
+        auto set_value(RpcResponse response_)
+        {
+            this->response_ = std::move(response_);
+            return handle_;
+        }
+
+      private:
+        RpcClient* client_;
+        ICallable* handle_;
+        uint64_t id_;
+        RpcResponse response_;
+        friend class RpcClient;
+    };
+    auto ready(uint64_t id) -> ReadyAwaiter { return ReadyAwaiter{this, id}; }
+    bool ready_impl(ReadyAwaiter* awaiter)
+    {
+        auto guard = std::lock_guard<std::mutex>(mutex_);
+        auto it = responses_.find(awaiter->id_);
+        if (it == responses_.end())
+        {
+            awaiters_.emplace(awaiter->id_, awaiter);
+            return false;
+        }
+
+        awaiter->set_value(std::move(it->second));
+        responses_.erase(it);
+        return true;
+    }
+    auto write_worker() -> Coroutine<>;
+    auto read_worker() -> Coroutine<>;
+    Socket socket_;
+    InetAddress server_addr_;
+    std::mutex mutex_;
+    std::atomic<bool> is_connected_ = false;
+    Channel<RpcRequest> pending_;
+    std::unordered_map<uint64_t, ReadyAwaiter*> awaiters_;
+    std::unordered_map<uint64_t, RpcResponse> responses_;
+    std::atomic<size_t> sequence_id_ = 0;
 };
 
+template <IsMessage R, IsMessage Arg>
+auto RpcClient::call(std::string method, const Arg& arg, R& reply) -> Coroutine<bool>
+{
+    if (!is_connected_.exchange(true))
+    {
+        if (auto res = co_await socket_.connect(server_addr_); res < 0)
+        {
+            co_return false;
+        }
+    }
+    auto sequence_id = ++sequence_id_;
+    if (auto res = co_await pending_.send(
+            {sequence_id, std::move(method), static_cast<const Message*>(&arg)->SerializeAsString()});
+        res != State::OK)
+    {
+        co_return false;
+    }
+    auto response = co_await ReadyAwaiter{this, sequence_id};
+    if (response.is_error)
+    {
+        co_return false;
+    }
+    co_return static_cast<Message*>(&reply)->ParseFromString(response.payload);
+}
 } // namespace utils

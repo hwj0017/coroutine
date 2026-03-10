@@ -1,6 +1,6 @@
 #pragma once
 #include "concurrentdeque.h"
-#include "coroutine/handle.h"
+#include "coroutine/icallable.h"
 #include "iocontext.h"
 #include "randomer.h"
 #include <atomic>
@@ -13,6 +13,7 @@
 #include <mutex>
 #include <queue>
 #include <span>
+#include <string>
 #include <sys/eventfd.h>
 #include <thread>
 #include <unistd.h>
@@ -20,6 +21,7 @@
 
 namespace utils
 {
+using Handle = ICallable*;
 // Processor (P)
 class Processor
 {
@@ -54,7 +56,7 @@ class Scheduler
         static Scheduler* scheduler = new Scheduler();
         return *scheduler;
     }
-    static const int max_procs = 1;
+    static const int max_procs = 16;
 
   private:
     // M执行循环
@@ -65,7 +67,7 @@ class Scheduler
     // 将就绪协程加入p
     auto get_global_coroutine(size_t max_count) -> std::vector<Handle>;
     void add_global_coroutine(std::span<Handle> coros);
-    void add_coro_to_processor(std::span<Handle> coros, Processor* processor);
+    void add_coro_to_processor(std::span<Handle> coros, Processor* processor, bool yield);
     auto get_coro_from_processor(Processor* processor) -> Handle;
     auto get_coro_with_spinning(Processor* processor) -> Handle;
     auto steal_coroutine(Processor* p) -> std::vector<Handle>;
@@ -121,7 +123,9 @@ inline Scheduler::Scheduler() : processors_(create_processors(max_procs))
     assert(max_procs >= 1);
     // 第一个协程不会spinning
     spinning_processors_count_.store(1);
-    idle_mask_ = (1 << max_procs) - 1;
+    // 除去自己
+    idle_mask_ = (1 << max_procs) - 2;
+    current_processor_ = processors_[0].get();
 }
 
 inline void Scheduler::schedule()
@@ -142,7 +146,7 @@ inline void Scheduler::co_spawn(Handle coro, bool yield)
     else
     {
         // 优先放入当前P的
-        add_coro_to_processor({&coro, 1}, current_processor_);
+        add_coro_to_processor({&coro, 1}, current_processor_, yield);
     }
     int expected = 0;
     if (spinning_processors_count_.load() > 0 || !spinning_processors_count_.compare_exchange_strong(expected, 1))
@@ -163,7 +167,7 @@ inline void Scheduler::processor_func(Processor* p)
     {
         auto coro = get_coro();
         assert(coro);
-        coro.resume();
+        coro->invoke();
     }
 }
 
@@ -221,7 +225,7 @@ inline auto Scheduler::get_coro() -> Handle
             {
                 auto coro = *it;
                 ++it;
-                add_coro_to_processor({it, coros.end()}, processor);
+                add_coro_to_processor({it, coros.end()}, processor, false);
                 processor->state = Processor::State::RUNNING;
                 running_mask_.fetch_or(1 << processor->id);
                 return coro;
@@ -276,7 +280,8 @@ inline void Scheduler::add_global_coroutine(std::span<Handle> coros)
     }
 }
 
-inline void Scheduler::add_coro_to_processor(std::span<Handle> coros, Processor* processor)
+// TODO:yield
+inline void Scheduler::add_coro_to_processor(std::span<Handle> coros, Processor* processor, bool yield)
 {
     if (auto it = coros.begin(); it != coros.end())
     {
@@ -326,7 +331,7 @@ inline auto Scheduler::get_coro_from_processor(Processor* processor) -> Handle
         {
             auto coro = *it;
             ++it;
-            add_coro_to_processor({it, coros.end()}, processor);
+            add_coro_to_processor({it, coros.end()}, processor, false);
             return coro;
         }
     }
@@ -347,7 +352,7 @@ inline auto Scheduler::get_coro_with_spinning(Processor* processor) -> Handle
     {
         auto coro = *it;
         ++it;
-        add_coro_to_processor({it, coros.end()}, processor);
+        add_coro_to_processor({it, coros.end()}, processor, false);
         return coro;
     }
     return {};
@@ -382,9 +387,9 @@ inline auto Scheduler::steal_coroutine(Processor* processor) -> std::vector<Hand
         if (auto coros = steal_processor->coros.pop_front_half(); !coros.empty())
         {
             std::string debug = " ";
-            for (auto& c : coros)
+            for (auto c : coros)
             {
-                debug += " " + std::to_string(promise(c).get_id());
+                debug += " " + std::to_string(c->id());
             }
             std::cout << " steal " + std::to_string(coros.size()) + debug + "\n";
             return coros;

@@ -1,8 +1,9 @@
 #include "rpc/rpcserver.h"
-
 #include "coroutine/coroutine.h"
-#include "rpc/common.pb.h"
-#include "tcp/tcpconnection.h"
+#include "coroutine/mutex.h"
+#include "coroutine/syscall.h"
+#include "rpcparser.h"
+#include "tcp/session.h"
 #include "tcp/tcpserver.h"
 #include <algorithm>
 #include <array>
@@ -10,68 +11,106 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <span>
 #include <string_view>
+#include <vector>
 namespace utils
 {
+// 引入一个协程安全的互斥锁 (你的框架如果支持的话，如 CoMutex)
+// 如果没有，且都在单线程调度器跑，普通逻辑队列也可以
+
+// 1. 定义 Impl 结构体及其成员函数
 struct RpcServer::Impl
 {
-    Impl(std::string_view listen_ip, uint16_t port)
-        : tcp_server_(listen_ip, port, [this](std::shared_ptr<TcpConnection> connection) -> Coroutine<> {
-              return handle_rpc_connection(std::move(connection));
-          })
+    TcpServer tcp_server_;
+    std::unordered_map<std::string, std::function<std::string(std::string)>> services_;
+
+    Impl(std::string_view listen_ip, uint16_t port) : tcp_server_(InetAddress{port, listen_ip})
     {
+        // 只需用一个极简的 lambda 转发给 Impl 的成员函数即可
+        tcp_server_.set_connection_handler([this](Socket connection) -> Coroutine<> {
+            return this->handle_connection(std::make_shared<RpcSession>(std::move(connection)));
+        });
     }
-    void start() { tcp_server_.start(); }
-    auto handle_rpc_connection(std::shared_ptr<TcpConnection> connection) -> Coroutine<>
+
+    // 提取出来的连接处理函数
+    Coroutine<> handle_connection(std::shared_ptr<RpcSession> session)
     {
-        constexpr size_t buffer_size = 1024;
-        std::array<char, buffer_size> buffer;
+        session->start();
+        constexpr size_t BufferSize = 1024;
+        Buffer buffer;
+        RpcParser parser;
+        RpcMessage msg;
+
         while (true)
         {
-            auto count = co_await connection->read(buffer);
-            if (count <= 0)
-            {
+            auto n = co_await session->read(buffer.writable_span(BufferSize));
+            if (n <= 0)
                 break;
-            }
-            ::rpc::Request request;
-            if (!request.ParseFromArray(buffer.data(), count))
+            buffer.commit_write(n);
+
+            while (!buffer.empty())
             {
-                std::cout << "error" << std::endl;
-                continue;
+                auto result = parser.parse(buffer.readable_span(), msg);
+
+                if (result == RpcParseResult::Error)
+                {
+                    session->close();
+                    co_return;
+                }
+                else if (result == RpcParseResult::Incomplete)
+                {
+                    break;
+                }
+                else if (result == RpcParseResult::Success)
+                {
+                    // 完美切包，将具体业务执行逻辑也提取为一个成员函数
+                    co_spawn(process_message(session, std::move(msg)));
+                    buffer.retrieve(parser.get_consumed_bytes());
+                    parser.reset();
+                }
             }
-            co_spawn(handle_rpc_request(connection, std::move(request)));
         }
     }
-    auto handle_rpc_request(std::shared_ptr<TcpConnection> connection, rpc::Request request) -> Coroutine<>
+
+    // 提取出来的单个 RPC 消息处理函数
+    Coroutine<> process_message(std::shared_ptr<RpcSession> session, RpcMessage msg)
     {
-        ::rpc::Response response;
-        auto it = services_.find(request.method());
-        response.set_method(std::move(request.method()));
-        if (it == services_.end())
+
+        RpcMessage response;
+        response.header.sequence_id = msg.header.sequence_id;
+        response.method = std::move(msg.method);
+
+        if (auto it = services_.find(msg.method); it == services_.end())
         {
-            response.set_output({});
+            response.header.status_code = 1;
         }
-        response.set_output(it->second(std::move(request.input())));
+        else
         {
-            auto guard = co_await mutex_.guard();
-            co_await connection->write(response.SerializeAsString());
+            response.payload = it->second(std::move(msg.payload));
+            response.header.status_code = 0;
+        }
+
+        // 发送响应回客户端
+        if (auto count = co_await session->send(response.string()); count != State::OK)
+        {
+            session->close();
         }
     }
-    void register_service_impl(std::string&& method, std::function<std::string(std::string)>&& func)
-    {
-        services_.emplace(std::move(method), std::move(func));
-    }
-    TcpServer tcp_server_;
-    Mutex mutex_;
-    std::unordered_map<std::string, std::function<std::string(std::string)>> services_;
 };
+
+// 2. RpcServer 构造函数：变得非常清爽
 RpcServer::RpcServer(std::string_view listen_ip, uint16_t port) : impl_(std::make_unique<Impl>(listen_ip, port)) {}
+
+// 3. 析构与移动语义实现
 RpcServer::~RpcServer() = default;
 
-void RpcServer::start() { impl_->start(); }
+// 4. 委托方法调用
+auto RpcServer::start() -> Coroutine<> { return impl_->tcp_server_.start(); }
+
 void RpcServer::register_service_impl(std::string method, std::function<std::string(std::string)> func)
 {
-    impl_->register_service_impl(std::move(method), std::move(func));
+    impl_->services_.emplace(std::move(method), std::move(func));
 }
 
 } // namespace utils

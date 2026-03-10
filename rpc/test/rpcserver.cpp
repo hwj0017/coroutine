@@ -14,7 +14,6 @@ auto utils::main_coro() -> MainCoroutine
 {
     RpcServer server("127.0.0.1", 8888);
     server.register_service("echo", echo);
-    server.start();
-    co_await server.join();
+    co_await server.start();
     co_return 0;
 }

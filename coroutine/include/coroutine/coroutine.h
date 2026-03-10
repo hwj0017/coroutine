@@ -1,5 +1,7 @@
 #pragma once
 #include "coroutine/cospawn.h"
+#include "coroutine/icallable.h"
+#include <atomic>
 #include <cassert>
 #include <coroutine>
 #include <cstddef>
@@ -9,121 +11,107 @@
 #include <variant>
 namespace utils
 {
+
 class YieldAwaiter
 {
   public:
     bool await_ready() const noexcept { return false; }
-    bool await_suspend(Handle handle) const noexcept
+    template <typename Promise> bool await_suspend(std::coroutine_handle<Promise> handle) const noexcept
     {
-        co_spawn(handle, true);
+        co_spawn(&handle.promise(), true);
         return true;
     }
     void await_resume() const noexcept {}
 };
 class CoroutineBase;
+class Promise : public ICallable
+{
+  public:
+    Promise() = default;
+    auto initial_suspend() noexcept { return std::suspend_always{}; }
+    auto final_suspend() noexcept { return std::suspend_never{}; };
+    void unhandled_exception() { std::exit(-1); }
+    auto yield_value(std::monostate value = {}) { return YieldAwaiter{}; }
+    void invoke() override { std::coroutine_handle<Promise>::from_promise(*this).resume(); }
+    void destroy() override { std::coroutine_handle<Promise>::from_promise(*this).destroy(); }
+    void set_awaiter(CoroutineBase* awaiter) { awaiter_ = awaiter; }
+
+  protected:
+    CoroutineBase* awaiter_{nullptr};
+};
 
 class CoroutineBase
 {
   public:
-    class PromiseTypeBase : public Promise
-    {
-      public:
-        PromiseTypeBase() = default;
-        auto initial_suspend() noexcept { return std::suspend_always{}; }
-        auto final_suspend() noexcept { return std::suspend_never{}; };
-        void unhandled_exception() { std::exit(-1); }
-        auto yield_value(std::monostate value = {}) { return YieldAwaiter{}; }
-        auto get_self_handle() -> Handle { return std::coroutine_handle<Promise>::from_promise(*this); }
-        void set_awaiter(CoroutineBase* awaiter) { awaiter_ = awaiter; }
-
-      protected:
-        CoroutineBase* awaiter_{nullptr};
-    };
     CoroutineBase() noexcept = default;
-    CoroutineBase(PromiseTypeBase* promise) noexcept : promise_(promise) {}
+    CoroutineBase(Promise* promise) noexcept : self_promise_(promise) {}
     CoroutineBase(const CoroutineBase&) = delete;
-    CoroutineBase(CoroutineBase&& coro) noexcept : promise_(coro.promise_) { coro.promise_ = nullptr; }
     ~CoroutineBase()
     {
-        if (promise_)
+        if (self_promise_)
         {
-            promise_->get_self_handle().destroy();
+            self_promise_->destroy();
         }
     }
-    CoroutineBase& operator=(CoroutineBase&& coro) noexcept
+    operator bool() { return self_promise_; }
+    auto await_ready() noexcept { return self_promise_ == nullptr; }
+    template <typename P> auto await_suspend(std::coroutine_handle<P> handle) noexcept
     {
-        if (this == &coro)
-        {
-            return *this;
-        }
-        if (promise_)
-        {
-            promise_->get_self_handle().destroy();
-        }
-        promise_ = coro.promise_;
-        coro.promise_ = nullptr;
-        return *this;
-    }
-    CoroutineBase& operator=(const CoroutineBase&) = default;
-    operator bool() { return promise_; }
-    auto await_ready() { return false; }
-    auto await_suspend(Handle handle)
-    {
-        handle_ = handle;
-        promise_->set_awaiter(this);
-        auto self_handle = promise_->get_self_handle();
-
+        awaiter_promise_ = &handle.promise();
+        self_promise_->set_awaiter(this);
+        auto self_handle = std::coroutine_handle<Promise>::from_promise(*self_promise_);
         // 先置空
-        promise_ = nullptr;
+        self_promise_ = nullptr;
         return self_handle;
     }
-    size_t get_id() { return promise_->get_id(); }
 
   protected:
     friend void co_spawn(CoroutineBase&& coro);
-    PromiseTypeBase* promise_;
+    Promise* self_promise_;
     // await_suspend的handle
-    Handle handle_;
+    Promise* awaiter_promise_;
 };
 
 inline void co_spawn(CoroutineBase&& coro)
 {
-    auto handle = coro.promise_->get_self_handle();
-    coro.promise_ = nullptr;
-    co_spawn(handle);
+    auto promise = coro.self_promise_;
+    co_spawn(promise);
+    coro.self_promise_ = nullptr;
 }
 template <typename T> class Coroutine;
 
 template <typename T = void> class Coroutine : public CoroutineBase
 {
   public:
-    class PromiseType : public PromiseTypeBase
+    class promise_type : public Promise
     {
       public:
         auto get_return_object() -> Coroutine<T>;
         void return_value(T value);
     };
-    using promise_type = PromiseType;
-    Coroutine(PromiseTypeBase* promise) : CoroutineBase(promise) {}
+    Coroutine() = default;
+    Coroutine(promise_type* promise) : CoroutineBase(promise) {}
     auto await_resume() { return std::move(value_); }
     auto set_value(T value)
     {
         value_ = std::move(value);
-        return handle_;
+        return awaiter_promise_;
     }
 
   private:
     T value_;
-    friend class Scheduler;
 };
-template <typename T> auto Coroutine<T>::PromiseType::get_return_object() -> Coroutine<T> { return Coroutine<T>(this); }
-template <typename T> void Coroutine<T>::PromiseType::return_value(T value)
+template <typename T> auto Coroutine<T>::promise_type::get_return_object() -> Coroutine<T>
+{
+    return Coroutine<T>(this);
+}
+template <typename T> void Coroutine<T>::promise_type::return_value(T value)
 {
     if (awaiter_)
     {
-        if (auto handle = static_cast<Coroutine<T>*>(awaiter_)->set_value(std::move(value)); handle)
+        if (auto promise = static_cast<Coroutine<T>*>(awaiter_)->set_value(std::move(value)); promise)
         {
-            co_spawn(handle);
+            co_spawn(promise);
         }
     }
 }
@@ -131,29 +119,26 @@ template <typename T> void Coroutine<T>::PromiseType::return_value(T value)
 template <> class Coroutine<void> : public CoroutineBase
 {
   public:
-    class PromiseType : public PromiseTypeBase
+    class promise_type : public Promise
     {
       public:
         auto get_return_object() -> Coroutine<void>;
         void return_void();
     };
-    using promise_type = PromiseType;
+    Coroutine() = default;
     Coroutine(promise_type* promise) : CoroutineBase(promise) {}
     void await_resume() {}
-    auto set_value() { return handle_; }
-
-  private:
-    Handle awaiter_handle_{nullptr};
+    auto set_value() { return awaiter_promise_; }
 };
 
-inline auto Coroutine<>::PromiseType::get_return_object() -> Coroutine<void> { return Coroutine<void>(this); }
-inline void Coroutine<>::PromiseType::return_void()
+inline auto Coroutine<>::promise_type::get_return_object() -> Coroutine<void> { return Coroutine<void>(this); }
+inline void Coroutine<>::promise_type::return_void()
 {
     if (awaiter_)
     {
-        if (auto handle = static_cast<Coroutine<>*>(awaiter_)->set_value(); handle)
+        if (auto promise = static_cast<Coroutine<>*>(awaiter_)->set_value(); promise)
         {
-            co_spawn(handle);
+            co_spawn(promise);
         }
     }
 }
@@ -161,18 +146,16 @@ inline void Coroutine<>::PromiseType::return_void()
 class MainCoroutine : public CoroutineBase
 {
   public:
-    class PromiseType : public PromiseTypeBase
+    class promise_type : public Promise
     {
       public:
         auto get_return_object() -> MainCoroutine { return MainCoroutine(this); }
         void return_value(int value)
         {
-            // 模拟main函数，先销毁局部变量
-            get_self_handle().destroy();
+            destroy();
             std::exit(value);
         }
     };
-    using promise_type = PromiseType;
     MainCoroutine(promise_type* promise) : CoroutineBase(promise) {}
 };
 } // namespace utils

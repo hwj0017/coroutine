@@ -4,7 +4,6 @@ file(GLOB_RECURSE COROUTINE_SOURCES
     "src/*.cpp"
     # 添加其他需要的源文件路径
 )
-message(STATUS "COROUTINE_SOURCES: ${COROUTINE_SOURCES}")
 # 创建静态库
 add_library(coroutine STATIC ${COROUTINE_SOURCES})
 # 设置头文件目录

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "coroutine/coroutine.h"
 #include "coroutine/cospawn.h"
 #include <cassert>
 #include <coroutine>
@@ -21,12 +22,11 @@ template <typename T = std::monostate> class Channel;
 template <typename T = std::monostate> class SendAwaiter
 {
   public:
-    using Handle = std::coroutine_handle<>;
     SendAwaiter(Channel<T>* channel, T&& value) : channel_(channel), value_(std::move(value)) {}
     bool await_ready() const noexcept { return false; }
-    bool await_suspend(Handle handle) noexcept
+    template <typename Promise> bool await_suspend(std::coroutine_handle<Promise> handle) noexcept
     {
-        handle_ = handle;
+        promise_ = &handle.promise();
         return channel_->send_impl(this);
     }
 
@@ -36,14 +36,14 @@ template <typename T = std::monostate> class SendAwaiter
     auto set_value()
     {
         state_ = State::OK;
-        return handle_;
+        return promise_;
     }
 
   private:
     Channel<T>* channel_;
     T value_{};
     State state_{State::CLOSED};
-    Handle handle_;
+    Promise* promise_{};
 };
 
 // 接收操作
@@ -54,9 +54,9 @@ template <typename T = std::monostate> class RecvAwaiter
     RecvAwaiter(Channel<T>* channel) : channel_(channel) {}
     auto await_ready() const noexcept { return false; }
 
-    auto await_suspend(Handle handle) noexcept
+    template <typename Promise> bool await_suspend(std::coroutine_handle<Promise> handle) noexcept
     {
-        handle_ = handle;
+        promise_ = &handle.promise();
         return channel_->recv_impl(this);
     }
 
@@ -74,14 +74,14 @@ template <typename T = std::monostate> class RecvAwaiter
     {
         value_ = std::move(value);
         state_ = State::OK;
-        return handle_;
+        return promise_;
     }
 
   private:
     Channel<T>* channel_;
     T value_{};
     State state_ = State::CLOSED;
-    Handle handle_;
+    Promise* promise_;
 };
 
 template <typename T> class Channel
@@ -132,7 +132,7 @@ template <typename T> class Channel
 
 template <typename T> bool Channel<T>::send_impl(SendAwaiter<T>* send_awaiter)
 {
-    Handle notify;
+    Promise* notify;
     {
         std::lock_guard lock(mutex_);
         // channel关闭，不阻塞
@@ -165,8 +165,7 @@ template <typename T> bool Channel<T>::send_impl(SendAwaiter<T>* send_awaiter)
 }
 template <typename T> bool Channel<T>::recv_impl(RecvAwaiter<T>* recv_awaiter)
 {
-    Handle notify;
-    ;
+    Promise* notify;
     {
         std::lock_guard lock(mutex_);
         // 关闭且为空，不阻塞

@@ -1,13 +1,15 @@
 #include "coroutine/cospawn.h"
+#include "coroutine/icallable.h"
 #include "coroutine/syscall.h"
 #include "schedule.h"
 #include "scheduler.h"
+#include "simplescheduler.h"
 namespace utils
 {
 
-auto instance() -> Scheduler& { return Scheduler::instance(); }
+auto& instance() { return Scheduler::instance(); }
 
-void co_spawn(Handle handle, bool yield) { instance().co_spawn(handle, yield); }
+void co_spawn(ICallable* call, bool yield) { instance().co_spawn(call, yield); }
 
 void schedule() { instance().schedule(); }
 

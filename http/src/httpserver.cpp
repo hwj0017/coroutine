@@ -1,11 +1,11 @@
 #include "http/httpserver.h"
+#include "coroutine/coroutine.h"
 #include "coroutine/syscall.h"
 #include "filesystem"
 #include "http/enums.h"
 #include "http/httpcontext.h"
 #include "httpparser.h"
 #include "router.h"
-#include "tcp/tcpconnection.h"
 #include "tcp/tcpserver.h"
 #include <cstddef>
 #include <span>
@@ -18,10 +18,9 @@ namespace utils
 HttpServer::HttpServer(std::string_view host, uint16_t port) : router_(std::make_unique<Router>())
 {
     // 创建 TcpServer，handler 为 HTTP 连接处理器
-    auto tcp_handler = [this](std::shared_ptr<TcpConnection> conn) -> Coroutine<> {
-        return handle_http_connection(std::move(conn));
-    };
-    tcp_server_ = std::make_unique<TcpServer>(host, port, tcp_handler);
+    auto tcp_handler = [this](Socket conn) -> Coroutine<> { return handle_http_connection(std::move(conn)); };
+    tcp_server_ = std::make_unique<TcpServer>(InetAddress(port, host));
+    tcp_server_->set_connection_handler(std::move(tcp_handler));
 }
 
 void HttpServer::GET(std::string path, HttpHandler handler)
@@ -107,20 +106,7 @@ void HttpServer::serve_static_files(std::string url_prefix, std::string root_dir
 }
 void HttpServer::use(HttpHandler middleware) { router_->add_middleware(std::move(middleware)); }
 
-void HttpServer::start() { tcp_server_->start(); }
-
-void HttpServer::stop() { tcp_server_->stop(); }
-
-// TODO
-auto HttpServer::join() -> std::suspend_always
-{
-    // 注意：std::suspend_always 不是 Coroutine 返回类型！
-    // 应返回 Coroutine，例如：
-    // co_await tcp_server_->join();
-    // 但你原设计为 std::suspend_always，这里暂按原接口
-    // 实际应修改为：auto join() -> Coroutine<>;
-    return {};
-}
+auto HttpServer::start() -> Coroutine<> { return tcp_server_->start(); }
 
 bool is_safe_path(std::string_view path)
 {
@@ -201,55 +187,72 @@ std::string get_content_type(const std::filesystem::path& path)
     return (it != types.end()) ? it->second : "application/octet-stream";
 }
 
-auto HttpServer::handle_http_connection(std::shared_ptr<TcpConnection> tcp_conn) -> Coroutine<>
+auto HttpServer::handle_http_connection(Socket tcp_conn) -> Coroutine<>
 {
     constexpr size_t buffer_size = 4096;
     HttpContext ctx;
     HttpParser parser;
-    std::array<char, buffer_size> buffer;
+    // 核心修改 1：引入连接级别的累积缓冲区
+    std::vector<char> buffer;
     while (true)
     {
-        auto n = co_await tcp_conn->read(buffer);
+        // 1. 动态准备可写空间（直接在尾部预留 4096 字节）
+        size_t old_size = buffer.size();
+        buffer.resize(old_size + 4096);
+
+        // 2. 直接读到 vector 的尾部空闲区域！完全没有 temp_buffer 的拷贝！
+        auto n = co_await tcp_conn.read(buffer.data() + old_size, 4096);
+
         if (n <= 0)
-            break;
-
-        auto result = parser.parse({buffer.data(), static_cast<size_t>(n)}, ctx.request());
-        if (result == HttpParser::ParseResult::error)
         {
-            // 发送 400
-            std::string resp = "HTTP/1.1 400 Bad Request\r\n\r\n";
-            co_await tcp_conn->write(resp);
-            break;
-        }
-        if (result == HttpParser::ParseResult::incomplete)
-        {
-            continue; // 等待更多数据
+            break; // 客户端断开或出错
         }
 
-        // 路由匹配
-        auto [handler, params] = router_->find_handler(ctx.request().method, ctx.request().path);
-        if (!handler)
-        {
-            std::string resp = "HTTP/1.1 404 Not Found\r\n\r\n";
-            co_await tcp_conn->write(resp);
-        }
-        else
-        {
-            auto middlewares = router_->get_middlewares();
-            middlewares.push_back(handler);
-            ctx.set_params(std::move(params));
-            ctx.set_middlewares(std::move(middlewares));
+        // 3. 截断多余的预留空间，让 vector 的 size 变成实际有效数据的总长度
+        buffer.resize(old_size + n);
 
-            co_await ctx.run();
-            co_await tcp_conn->write(ctx.response().message());
-        }
-
-        if (!parser.is_keep_alive())
+        // 4. 开始解析 (直接拿 buffer 开刀)
+        while (!buffer.empty())
         {
-            break;
+            auto result = parser.parse({buffer.data(), buffer.size()}, ctx.request());
+
+            if (result == HttpParser::ParseResult::error)
+            {
+                std::string resp = "HTTP/1.1 400 Bad Request\r\n\r\n";
+                co_await tcp_conn.write(resp.data(), resp.size());
+                co_return;
+            }
+
+            if (result == HttpParser::ParseResult::incomplete)
+            {
+                break; // 数据不够，直接跳出内层循环，外层 read 会自动在尾部追加数据
+            }
+            // 5. 成功解析出一个完整请求，处理它！
+            // 路由匹配
+            auto [handler, params] = router_->find_handler(ctx.request().method, ctx.request().path);
+            if (!handler)
+            {
+                std::string resp = "HTTP/1.1 404 Not Found\r\n\r\n";
+                co_await tcp_conn.write(resp);
+            }
+            else
+            {
+                auto middlewares = router_->get_middlewares();
+                middlewares.push_back(handler);
+                ctx.set_params(std::move(params));
+                ctx.set_middlewares(std::move(middlewares));
+
+                co_await ctx.run();
+                co_await tcp_conn.write(ctx.response().message());
+            }
+            buffer.clear();
+
+            if (!ctx.request().is_keep_alive())
+            {
+                break;
+            }
         }
     }
-    tcp_conn->close();
 }
 HttpServer::~HttpServer() = default;
 } // namespace utils

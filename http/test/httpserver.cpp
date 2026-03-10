@@ -9,7 +9,6 @@ auto utils::main_coro() -> MainCoroutine
         ctx->response().body = "Hello World";
         co_return;
     });
-    server.start();
-    co_await server.join();
+    co_await server.start();
     co_return 0;
 }

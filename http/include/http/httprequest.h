@@ -23,6 +23,26 @@ class HttpRequest
         headers_.clear();
         body_ = {};
     }
+    bool is_keep_alive() const
+    {
+        auto it = headers_.find("Connection");
+        if (it != headers_.end())
+        {
+            auto conn_val = it->second;
+            if (conn_val == "close")
+            {
+                return false;
+            }
+            if (conn_val == "keep-alive")
+            {
+                return true;
+            }
+        }
+
+        // 如果没有显式指定 Connection 头，则由 HTTP 版本决定默认行为
+        // HTTP/1.1 默认 Keep-Alive，HTTP/1.0 默认 Close
+        return version == Version::Http11;
+    }
 
   public:
     Method method{Method::Invalid};

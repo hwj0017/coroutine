@@ -3,6 +3,8 @@
 #include "coroutine/main.h"
 #include "coroutine/mutex.h"
 #include <cstddef>
+#include <iostream>
+#include <string>
 
 utils::Mutex mtx;
 size_t count = 0;
@@ -11,6 +13,7 @@ auto func(utils::Channel<>& ch) -> utils::Coroutine<>
     {
         auto lock = co_await mtx.guard();
         count++;
+        std::cout << std::to_string(count) << " \n";
         if (count == 1000)
         {
             co_await ch.send();

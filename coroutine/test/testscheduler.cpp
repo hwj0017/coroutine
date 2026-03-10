@@ -21,7 +21,6 @@ auto utils::main_coro() -> MainCoroutine
     {
         co_spawn(funcA(i, c));
     }
-    release();
     for (int i = 0; i < 1; ++i)
     {
         co_await c.recv();

@@ -8,7 +8,7 @@ auto utils::main_coro() -> MainCoroutine
     rpc::EchoRequest req;
     req.set_data("hello");
     rpc::EchoResponse res;
-    if (co_await server.call("echo", req, &res))
+    if (co_await server.call("echo", req, res))
     {
         std::cout << res.data() << std::endl;
     }

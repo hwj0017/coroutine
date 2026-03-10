@@ -3,27 +3,26 @@
 #include "coroutine/channel.h"
 #include "coroutine/coroutine.h"
 #include "coroutine/mutex.h"
-#include "rpc/common.pb.h"
 #include "rpc/message.h"
+#include "tcp/socket.h"
+#include "tcp/tcpserver.h"
 #include <functional>
-
 #include <map>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
-
 namespace utils
 {
+
 class RpcServer
 {
   public:
     RpcServer(std::string_view listen_ip, uint16_t port);
     ~RpcServer();
-    void start();
+    auto start() -> Coroutine<>;
+
     template <typename F> void register_service(std::string method, F func);
-    void stop();
-    auto join() -> std::suspend_always { return {}; }
 
   private:
     template <IsMessage R, IsMessage Arg> static auto wrap(R (*func)(Arg), std::string&& arg) -> std::string;

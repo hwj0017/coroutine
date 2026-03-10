@@ -1,12 +1,13 @@
 #pragma once
 
-#include "coroutine/handle.h"
+#include "coroutine/coroutine.h"
 #include <ctime>
 #include <fcntl.h>
 #include <string_view>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <type_traits>
+#include <unistd.h>
 namespace utils
 {
 class IOContext;
@@ -19,20 +20,20 @@ class SysAwaiterBase
     auto set_value(int result)
     {
         result_ = result;
-        return handle_;
+        return promise_;
     }
 
   protected:
     int result_;
-    Handle handle_;
+    Promise* promise_;
 };
 template <typename T> class SysAwaiter : public SysAwaiterBase
 {
   public:
     ~SysAwaiter() = default;
-    bool await_suspend(Handle handle) noexcept
+    template <typename Promise> bool await_suspend(std::coroutine_handle<Promise> handle) noexcept
     {
-        handle_ = handle;
+        promise_ = &handle.promise();
         static_assert(std::is_base_of_v<SysAwaiter<T>, T>);
         return process(static_cast<T*>(this));
     }

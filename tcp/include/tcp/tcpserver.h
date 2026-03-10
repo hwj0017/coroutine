@@ -1,38 +1,70 @@
-// #include
 #pragma once
 #include "coroutine/coroutine.h"
-#include <coroutine>
-#include <cstdint>
+#include "socket.h"
 #include <functional>
-#include <memory>
-#include <span>
-#include <string>
-#include <string_view>
 namespace utils
 {
-class TcpConnection;
-// 用户处理连接的协程函数类型
-// 注意：使用 shared_ptr 保证连接对象在协程中存活
-
+class Socket;
 class TcpServer
 {
   public:
-    using Handler = std::function<utils::Coroutine<>(std::shared_ptr<TcpConnection>)>;
-    TcpServer(std::string_view host, uint16_t port, Handler handler);
-    ~TcpServer();
-    // 启动服务器（非阻塞，立即返回）
-    // 内部会 co_spawn 接受连接的协程
-    void start();
-    // 停止服务器（关闭监听 socket，不再接受新连接）
-    // 已建立的连接不受影响（由用户或连接自身管理）
-    // TODO
-    void stop() {}
-
-    // 等待服务器完全退出（可选，用于优雅关闭）
-    auto join() -> std::suspend_always;
+    // 定义业务处理句柄的类型：接收一个移动构造的 Socket，返回一个协程任务
+    using ConnectionHandler = std::function<Coroutine<>(Socket)>;
 
   private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    Socket listen_socket_;
+    InetAddress server_addr_;
+    ConnectionHandler on_connection_;
+
+  public:
+    // 构造函数：初始化监听 Socket
+    TcpServer(const InetAddress& addr) : server_addr_(addr)
+    {
+        // 创建非阻塞的 IPv4 TCP Socket
+        int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        if (fd < 0)
+        {
+            throw std::runtime_error("Failed to create listen socket");
+        }
+
+        // 赋予 Socket 对象管理权
+        listen_socket_ = Socket(fd);
+
+        // 设置 SO_REUSEADDR，防止服务端重启时报 "Address already in use"
+        int opt = 1;
+        ::setsockopt(listen_socket_.fd(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    }
+
+    // 注册业务处理函数
+    void set_connection_handler(ConnectionHandler handler) { on_connection_ = std::move(handler); }
+
+    // 启动服务器的主循环 (注意：这本身也是一个协程)
+    auto start() -> Coroutine<>
+    {
+        if (!on_connection_)
+        {
+            throw std::runtime_error("Connection handler not set before starting server");
+        }
+
+        listen_socket_.bind(server_addr_);
+        listen_socket_.listen();
+
+        printf("TcpServer started, listening on %s:%d\n", server_addr_.ip().c_str(), server_addr_.port());
+
+        // 核心：无尽的 accept 循环
+        while (true)
+        {
+            // 1. 异步等待新连接，协程在此挂起，不阻塞主线程
+            Socket client_socket = co_await listen_socket_.accept();
+
+            // 2. 如果接受连接成功
+            if (client_socket.is_valid())
+            {
+                // 3. 调用用户注册的 handler 生成协程，并用 co_spawn 扔给调度器去执行
+                // 注意：使用 std::move 把 Socket 的所有权安全地转移给业务协程
+                co_spawn(on_connection_(std::move(client_socket)));
+            }
+        }
+    }
 };
 } // namespace utils

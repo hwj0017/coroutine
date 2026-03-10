@@ -2,6 +2,7 @@
 #include "coroutine/coroutine.h"
 #include "http/enums.h"
 #include "http/httphandler.h"
+#include "tcp/tcpserver.h"
 #include <coroutine>
 #include <functional>
 #include <memory>
@@ -35,16 +36,11 @@ class HttpServer
     void use(HttpHandler middleware);
 
     // 启动（非阻塞）
-    void start();
-
-    // 停止 & 等待
-    void stop();
-    auto join() -> std::suspend_always;
-
+    auto start() -> Coroutine<>;
     ~HttpServer();
 
   private:
-    auto handle_http_connection(std::shared_ptr<TcpConnection>) -> Coroutine<>;
+    auto handle_http_connection(Socket) -> Coroutine<>;
     std::unique_ptr<TcpServer> tcp_server_;
     std::unique_ptr<Router> router_; // 路由表（基于前缀树）
 };

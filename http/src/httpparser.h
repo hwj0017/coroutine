@@ -22,14 +22,11 @@ class HttpParser
     };
 
     auto parse(std::span<char> data, HttpRequest& req) -> ParseResult;
-    bool is_keep_alive() const { return keep_alive_; }
 
   private:
     bool parse_line(std::span<char> line, HttpRequest& req);
     // 去除空格
     inline auto trim(std::string_view str) -> std::string_view;
-    std::string buffer_;
-    bool keep_alive_ = true;
 };
 inline bool HttpParser::parse_line(std::span<char> line, HttpRequest& req)
 {

@@ -31,14 +31,21 @@ class HttpContext
     void add_error(std::string msg);
     auto& errors() const;
     void set_middlewares(std::vector<HttpHandler>&& middlewares) { middlewares_ = std::move(middlewares); }
+    auto next()
+    {
+        if (next_middleware_ >= middlewares_.size())
+        {
+            return Coroutine<>{};
+        }
+        return middlewares_[next_middleware_++](this);
+    }
     // TODO:洋葱模型
     auto run() -> Coroutine<>
     {
-        for (auto& mw : middlewares_)
-        {
-            co_await mw(this);
-        }
+        next_middleware_ = 0;
+        co_await next();
     }
+
     void set_params(std::unordered_map<std::string_view, std::string_view>&& params)
     {
         path_params_ = std::move(params);
