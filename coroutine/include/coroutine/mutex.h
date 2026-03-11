@@ -138,7 +138,6 @@ class ConditionVariable::WaitAwaiter : public Mutex::Awaiter
 
     void await_resume() const noexcept {}
 
-    // 【绝杀技：静默预检】由 Mutex::unlock 在底层调用
     bool try_claim_lock() override
     {
         if (!predicate_)

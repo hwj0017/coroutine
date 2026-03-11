@@ -285,23 +285,36 @@ inline void Scheduler::add_coro_to_processor(std::span<Handle> coros, Processor*
 {
     if (auto it = coros.begin(); it != coros.end())
     {
-        // 优先放入run_next
-        auto old_run_next = processor->run_next.exchange(*it);
-        if (old_run_next)
+        if (!yield)
         {
-            *it = old_run_next;
+            // 优先放入run_next
+            auto old_run_next = processor->run_next.exchange(*it);
+            if (old_run_next)
+            {
+                *it = old_run_next;
+            }
+            else
+            {
+                ++it;
+            }
         }
-        else
-        {
-            ++it;
-        }
+
         if (it != coros.end())
         {
-            auto res = processor->coros.push_back({it, coros.end()});
-            it += res;
-            if (it != coros.end())
+            if (processor->coros.full())
             {
-                add_global_coroutine({it, coros.end()});
+                auto half = processor->coros.pop_front_half();
+                half.push_back(*it);
+                add_global_coroutine(half);
+            }
+            else
+            {
+                auto res = processor->coros.push_back({it, coros.end()});
+                it += res;
+                if (it != coros.end())
+                {
+                    add_global_coroutine({it, coros.end()});
+                }
             }
         }
     }
