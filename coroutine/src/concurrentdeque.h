@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <iostream>
 #include <span>
 #include <type_traits> // for static_assert
 #include <vector>
@@ -28,6 +29,7 @@ template <typename T> class WorkStealingDeque
   public:
     WorkStealingDeque(size_t capacity) : buffer_(capacity), capacity_(capacity), mask(capacity - 1)
     {
+        std::cout << "WorkStealingDeque capacity: " << capacity_ << std::endl;
         assert((capacity_ & mask) == 0 && "Capacity must be a power of two.");
     }
 

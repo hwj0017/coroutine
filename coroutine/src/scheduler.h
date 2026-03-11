@@ -8,7 +8,9 @@
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -35,8 +37,8 @@ class Processor
     explicit Processor(size_t id, size_t capacity) : id(id), coros(capacity) {}
 
     ~Processor() {}
-    size_t id;
-    std::thread thread;
+    size_t id{};
+    std::thread thread{};
     std::atomic<Handle> run_next{};
     IOContext iocontext{};
     WorkStealingDeque<Handle> coros;
@@ -67,7 +69,8 @@ class Scheduler
     // 将就绪协程加入p
     auto get_global_coroutine(size_t max_count) -> std::vector<Handle>;
     void add_global_coroutine(std::span<Handle> coros);
-    void add_coro_to_processor(std::span<Handle> coros, Processor* processor, bool yield);
+    void add_coro_to_processor(std::span<Handle> coros, Processor* processor);
+    void add_coro_to_processor(Handle coro, Processor* processor, bool yield);
     auto get_coro_from_processor(Processor* processor) -> Handle;
     auto get_coro_with_spinning(Processor* processor) -> Handle;
     auto steal_coroutine(Processor* p) -> std::vector<Handle>;
@@ -79,7 +82,7 @@ class Scheduler
     // 全部P
     const std::vector<std::unique_ptr<Processor>> processors_;
     // 全局队列
-    std::queue<Handle> global_coros_{};
+    std::deque<Handle> global_coros_{};
     std::mutex global_coros_mtx_{};
 
     // 全局锁
@@ -95,7 +98,6 @@ class Scheduler
     // 自旋P
     std::atomic<int> spinning_processors_count_{0};
     std::atomic<bool> need_spinning_{false};
-    std::atomic<bool> waiting_spining_{false};
 
     static auto create_processors(size_t n) -> std::vector<std::unique_ptr<Processor>>
     {
@@ -105,6 +107,7 @@ class Scheduler
         {
             procs.push_back(std::make_unique<Processor>(i, max_local_queue_size));
         }
+
         return procs;
     }
     static thread_local Processor* current_processor_;
@@ -146,7 +149,7 @@ inline void Scheduler::co_spawn(Handle coro, bool yield)
     else
     {
         // 优先放入当前P的
-        add_coro_to_processor({&coro, 1}, current_processor_, yield);
+        add_coro_to_processor(coro, current_processor_, yield);
     }
     int expected = 0;
     if (spinning_processors_count_.load() > 0 || !spinning_processors_count_.compare_exchange_strong(expected, 1))
@@ -201,17 +204,21 @@ inline auto Scheduler::get_coro() -> Handle
         case Processor::State::SPINNING: {
             Handle coro = get_coro_with_spinning(processor);
             bool last_spinning = (spinning_processors_count_.fetch_sub(1) == 1);
-            if (!coro && last_spinning)
-            {
-                // 如果是最后一个，需要在检查一次（全局队列）
-                coro = get_coro_with_spinning(processor);
-            }
-
             if (coro)
             {
                 processor->state = Processor::State::RUNNING;
                 running_mask_.fetch_or(1 << processor->id);
                 return coro;
+            }
+            if (last_spinning)
+            {
+                // 如果是最后一个，需要在检查一次（全局队列）
+                if (coro = get_coro_with_spinning(processor); coro)
+                {
+                    processor->state = Processor::State::RUNNING;
+                    running_mask_.fetch_or(1 << processor->id);
+                    return coro;
+                }
             }
             processor->state = Processor::State::POLLING;
             break;
@@ -225,7 +232,7 @@ inline auto Scheduler::get_coro() -> Handle
             {
                 auto coro = *it;
                 ++it;
-                add_coro_to_processor({it, coros.end()}, processor, false);
+                add_coro_to_processor({it, coros.end()}, processor);
                 processor->state = Processor::State::RUNNING;
                 running_mask_.fetch_or(1 << processor->id);
                 return coro;
@@ -266,6 +273,7 @@ inline void Scheduler::need_spinning()
                 idle_mask_.fetch_or(low_1bit);
                 return;
             }
+            assert(index < max_procs && index > 0);
             wake_from_idle(processors_[index].get());
         }
     }
@@ -274,49 +282,42 @@ inline void Scheduler::need_spinning()
 inline void Scheduler::add_global_coroutine(std::span<Handle> coros)
 {
     std::lock_guard<std::mutex> lock(global_coros_mtx_);
-    for (auto& coro : coros)
-    {
-        global_coros_.push(std::move(coro));
-    }
+    global_coros_.insert(global_coros_.end(), coros.begin(), coros.end());
 }
 
 // TODO:yield
-inline void Scheduler::add_coro_to_processor(std::span<Handle> coros, Processor* processor, bool yield)
+inline void Scheduler::add_coro_to_processor(Handle coro, Processor* processor, bool yield)
 {
-    if (auto it = coros.begin(); it != coros.end())
+    assert(coro);
+    if (!yield)
     {
-        if (!yield)
+        // 优先放入run_next
+        auto old_run_next = processor->run_next.exchange(coro);
+        if (!old_run_next)
         {
-            // 优先放入run_next
-            auto old_run_next = processor->run_next.exchange(*it);
-            if (old_run_next)
-            {
-                *it = old_run_next;
-            }
-            else
-            {
-                ++it;
-            }
+            return;
         }
+        coro = old_run_next;
+    }
 
-        if (it != coros.end())
-        {
-            if (processor->coros.full())
-            {
-                auto half = processor->coros.pop_front_half();
-                half.push_back(*it);
-                add_global_coroutine(half);
-            }
-            else
-            {
-                auto res = processor->coros.push_back({it, coros.end()});
-                it += res;
-                if (it != coros.end())
-                {
-                    add_global_coroutine({it, coros.end()});
-                }
-            }
-        }
+    if (auto count = processor->coros.push_back({&coro, 1}); count == 1)
+    {
+        return;
+    }
+    auto half = processor->coros.pop_front_half();
+    half.push_back(coro);
+    add_global_coroutine(half);
+    return;
+}
+inline void Scheduler::add_coro_to_processor(std::span<Handle> coros, Processor* processor)
+{
+    if (coros.empty())
+    {
+        return;
+    }
+    if (auto res = processor->coros.push_back(coros); res != coros.size())
+    {
+        add_global_coroutine(coros.subspan(res));
     }
 }
 
@@ -344,7 +345,7 @@ inline auto Scheduler::get_coro_from_processor(Processor* processor) -> Handle
         {
             auto coro = *it;
             ++it;
-            add_coro_to_processor({it, coros.end()}, processor, false);
+            add_coro_to_processor({it, coros.end()}, processor);
             return coro;
         }
     }
@@ -365,7 +366,7 @@ inline auto Scheduler::get_coro_with_spinning(Processor* processor) -> Handle
     {
         auto coro = *it;
         ++it;
-        add_coro_to_processor({it, coros.end()}, processor, false);
+        add_coro_to_processor({it, coros.end()}, processor);
         return coro;
     }
     return {};
@@ -377,11 +378,8 @@ inline auto Scheduler::get_global_coroutine(size_t max_count) -> std::vector<Han
     std::lock_guard<std::mutex> lock(global_coros_mtx_);
     auto get_coros_size = std::min(std::min(global_coros_.size() / max_procs + 1, global_coros_.size()), max_count);
     coros.reserve(get_coros_size);
-    for (int i = 0; i < get_coros_size; i++)
-    {
-        coros.push_back(global_coros_.front());
-        global_coros_.pop();
-    }
+    coros.insert(coros.end(), global_coros_.begin(), global_coros_.begin() + get_coros_size);
+    global_coros_.erase(global_coros_.begin(), global_coros_.begin() + get_coros_size);
     return coros;
 }
 
@@ -399,12 +397,6 @@ inline auto Scheduler::steal_coroutine(Processor* processor) -> std::vector<Hand
         }
         if (auto coros = steal_processor->coros.pop_front_half(); !coros.empty())
         {
-            std::string debug = " ";
-            for (auto c : coros)
-            {
-                debug += " " + std::to_string(c->id());
-            }
-            std::cout << " steal " + std::to_string(coros.size()) + debug + "\n";
             return coros;
         }
     }

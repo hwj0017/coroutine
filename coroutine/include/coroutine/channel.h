@@ -132,7 +132,7 @@ template <typename T> class Channel
 
 template <typename T> bool Channel<T>::send_impl(SendAwaiter<T>* send_awaiter)
 {
-    Promise* notify;
+    Promise* notify = nullptr;
     {
         std::lock_guard lock(mutex_);
         // channel关闭，不阻塞
@@ -165,7 +165,7 @@ template <typename T> bool Channel<T>::send_impl(SendAwaiter<T>* send_awaiter)
 }
 template <typename T> bool Channel<T>::recv_impl(RecvAwaiter<T>* recv_awaiter)
 {
-    Promise* notify;
+    Promise* notify = nullptr;
     {
         std::lock_guard lock(mutex_);
         // 关闭且为空，不阻塞
@@ -186,9 +186,11 @@ template <typename T> bool Channel<T>::recv_impl(RecvAwaiter<T>* recv_awaiter)
             auto send_awaiter = send_awaiters_.front();
             send_awaiters_.pop();
             resource_.push(send_awaiter->get_value());
+            notify = send_awaiter->set_value();
+            recv_awaiter->set_value(std::move(resource_.front()));
+            resource_.pop();
         }
 
-        notify = recv_awaiter->set_value(std::move(resource_.front()));
         resource_.pop();
     }
     if (notify)

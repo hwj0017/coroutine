@@ -4,12 +4,17 @@
 #include "schedule.h"
 #include "scheduler.h"
 #include "simplescheduler.h"
+#include <iostream>
 namespace utils
 {
 
 auto& instance() { return Scheduler::instance(); }
 
-void co_spawn(ICallable* call, bool yield) { instance().co_spawn(call, yield); }
+void co_spawn(ICallable* call, bool yield)
+{
+    auto& scheduler = instance();
+    scheduler.co_spawn(call, yield);
+}
 
 void schedule() { instance().schedule(); }
 

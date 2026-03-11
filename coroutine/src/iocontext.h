@@ -52,13 +52,14 @@ class IOContext
         io_uring_for_each_cqe(&ring_, head, cqe)
         {
             // 只是唤醒
-            if (!cqe->user_data)
+            auto awaiter = reinterpret_cast<SysAwaiterBase*>(cqe->user_data);
+            if (awaiter == &eventfd_awaiter_)
             {
                 wake_up = true;
             }
             else
             {
-                auto awaiter = reinterpret_cast<SysAwaiterBase*>(cqe->user_data);
+
                 auto handle = awaiter->set_value(cqe->res);
                 coroutines.push_back(handle);
             }
@@ -105,18 +106,19 @@ class IOContext
     io_uring ring_;
     int eventfd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     uint64_t eventfd_buf_ = 0;
-    ReadAwaiter eventfd_awaiter_;
+    ReadAwaiter eventfd_awaiter_{};
 
     // eventfd_ read 的缓冲区
-    std::queue<std::function<void()>> pending_call_;
+    std::queue<std::function<void()>> pending_call_{};
     size_t event_count_ = 0;
     size_t unsubmitted_count_ = 0;
     friend class Scheduler;
 };
 
-inline IOContext::IOContext() : ring_()
+inline IOContext::IOContext()
 {
-    assert(!io_uring_queue_init(8, &ring_, 0));
+    auto res = io_uring_queue_init(8, &ring_, 0);
+    assert(res >= 0);
     eventfd_awaiter_ = {eventfd_, &eventfd_buf_, 8};
     process(&eventfd_awaiter_);
 }

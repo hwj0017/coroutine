@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 #include <utility>
 #include <variant>
 namespace utils
@@ -16,10 +17,9 @@ class YieldAwaiter
 {
   public:
     bool await_ready() const noexcept { return false; }
-    template <typename Promise> bool await_suspend(std::coroutine_handle<Promise> handle) const noexcept
+    template <typename Promise> void await_suspend(std::coroutine_handle<Promise> handle) const noexcept
     {
         co_spawn(&handle.promise(), true);
-        return true;
     }
     void await_resume() const noexcept {}
 };
@@ -67,16 +67,16 @@ class CoroutineBase
 
   protected:
     friend void co_spawn(CoroutineBase&& coro);
-    Promise* self_promise_;
+    Promise* self_promise_{};
     // await_suspend的handle
-    Promise* awaiter_promise_;
+    Promise* awaiter_promise_{};
 };
 
 inline void co_spawn(CoroutineBase&& coro)
 {
     auto promise = coro.self_promise_;
-    co_spawn(promise);
     coro.self_promise_ = nullptr;
+    co_spawn(promise);
 }
 template <typename T> class Coroutine;
 

@@ -63,7 +63,7 @@ auto RpcClient::read_worker() -> Coroutine<>
             }
             else if (result == RpcParseResult::Success)
             {
-                ICallable* handle;
+                ICallable* handle = nullptr;
                 {
                     auto guard = std::lock_guard(mutex_);
                     if (auto it = awaiters_.find(msg.header.sequence_id); it == awaiters_.end())

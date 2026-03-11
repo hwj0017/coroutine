@@ -34,4 +34,8 @@ target_sources(test_io PRIVATE testio.cpp)
 target_include_directories(test_io PRIVATE ../include)
 target_link_libraries(test_io PRIVATE coroutine)
 
+add_executable(check)
+target_sources(check PRIVATE check.cpp)
+target_include_directories(check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src ../include)
+
 

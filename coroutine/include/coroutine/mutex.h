@@ -3,6 +3,7 @@
 #include "coroutine/cospawn.h"
 #include "coroutine/syscall.h"
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <queue>
@@ -27,21 +28,23 @@ class Mutex
 
     std::mutex mtx_;
     bool locked_ = false;
-    std::queue<Awaiter*> waiters_;
+    std::deque<Awaiter*> waiters_;
     friend class ConditionVariable;
 };
 
 class ConditionVariable
 {
+  public:
     class WaitAwaiter;
     ConditionVariable(Mutex& mutex) : mutex_(mutex) {}
-    void notify_one() {}
-    void notify_all() {}
+    auto wait(std::function<bool()> predicate = nullptr) -> WaitAwaiter;
+    void notify_one();
+    void notify_all();
 
   private:
     bool wait_impl(WaitAwaiter& awaiter);
     Mutex& mutex_;
-    std::queue<WaitAwaiter*> waiters_;
+    std::deque<WaitAwaiter*> waiters_;
 };
 
 class Mutex::Awaiter
@@ -109,7 +112,6 @@ class Mutex::GuardAwaiter : public Mutex::Awaiter
     auto await_resume() const noexcept { return Guard{m_}; }
 };
 
-// 【关键设计】必须继承 Mutex::Awaiter，因为我们要把它转移进 Mutex 队列
 class ConditionVariable::WaitAwaiter : public Mutex::Awaiter
 {
   public:
@@ -127,7 +129,7 @@ class ConditionVariable::WaitAwaiter : public Mutex::Awaiter
 
         { // 1. 先把自己加入 CV 的等待队列
             std::lock_guard<std::mutex> lock(cv_.mutex_.mtx_);
-            cv_.waiters_.push(this);
+            cv_.waiters_.push_back(this);
         }
 
         // 2. 然后解锁绑定的 Mutex 锁（这会自动唤醒在 Mutex 上排队的其他协程）
@@ -147,7 +149,7 @@ class ConditionVariable::WaitAwaiter : public Mutex::Awaiter
 
         // 条件不满足！我们必须拒绝接管这把锁，并把自己重新放回 CV 队列排队
         std::lock_guard<std::mutex> lock(cv_.mutex_.mtx_);
-        cv_.waiters_.push(this);
+        cv_.waiters_.push_back(this);
         return false;
     }
 
@@ -157,12 +159,16 @@ class ConditionVariable::WaitAwaiter : public Mutex::Awaiter
 };
 inline auto Mutex::lock() -> LockAwaiter { return LockAwaiter(*this); }
 inline auto Mutex::guard() -> GuardAwaiter { return GuardAwaiter(*this); }
+inline auto ConditionVariable::wait(std::function<bool()> predicate) -> WaitAwaiter
+{
+    return WaitAwaiter(*this, std::move(predicate));
+}
 inline bool Mutex::lock_impl(Awaiter& awaiter)
 {
     std::lock_guard<std::mutex> lock(mtx_);
     if (locked_)
     {
-        waiters_.push(&awaiter);
+        waiters_.push_back(&awaiter);
         return false;
     }
     locked_ = true;
@@ -170,7 +176,7 @@ inline bool Mutex::lock_impl(Awaiter& awaiter)
 }
 inline bool ConditionVariable::wait_impl(WaitAwaiter& awaiter)
 {
-    waiters_.push(&awaiter);
+    waiters_.push_back(&awaiter);
     return false;
 }
 inline void Mutex::unlock()
@@ -183,7 +189,7 @@ inline void Mutex::unlock()
     while (!waiters_.empty())
     {
         awaiter_to_resume = waiters_.front();
-        waiters_.pop();
+        waiters_.pop_front();
 
         locked_ = true; // 试探性地把锁移交给这个协程
         mtx_.unlock();  // 必须在此处释放自旋锁，防止 Predicate 里的业务代码死锁！
@@ -227,6 +233,63 @@ inline void Mutex::unlock()
         {
             co_spawn(handle);
         }
+    }
+}
+inline void ConditionVariable::notify_one()
+{
+    bool need_kick = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_.mtx_);
+        if (waiters_.empty())
+        {
+            return;
+        }
+
+        // 1. 从 CV 队列取出一个等待者
+        auto* waiter = waiters_.front();
+        waiters_.pop_front();
+
+        // 2. 将其塞入 Mutex 的等待队列
+        mutex_.waiters_.push_back(static_cast<Mutex::Awaiter*>(waiter));
+
+        // 3. 【核心修复】如果此时锁是空的，必须主动踹一脚！
+        if (!mutex_.locked_)
+        {
+            mutex_.locked_ = true; // 临时霸占锁的所有权，防止别人抢走
+            need_kick = true;
+        }
+    }
+
+    // 必须在释放了自旋锁之后再调用 unlock，否则会导致 unlock 内部死锁
+    if (need_kick)
+    {
+        mutex_.unlock(); // 触发内部的事件循环，安全地把锁移交给协程
+    }
+}
+
+inline void ConditionVariable::notify_all()
+{
+    bool need_kick = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_.mtx_);
+        if (waiters_.empty())
+        {
+            return;
+        }
+
+        mutex_.waiters_.insert(mutex_.waiters_.end(), waiters_.begin(), waiters_.end());
+        waiters_.clear();
+
+        if (!mutex_.locked_)
+        {
+            mutex_.locked_ = true;
+            need_kick = true;
+        }
+    }
+
+    if (need_kick)
+    {
+        mutex_.unlock();
     }
 }
 } // namespace utils
