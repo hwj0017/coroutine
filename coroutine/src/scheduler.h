@@ -124,7 +124,7 @@ inline thread_local Randomer Scheduler::randomer_{};
 inline Scheduler::Scheduler() : processors_(create_processors(max_procs))
 {
     assert(max_procs >= 1);
-    // 第一个协程不会spinning
+    // 第一个协程不会唤醒
     spinning_processors_count_.store(1);
     // 除去自己
     idle_mask_ = (1 << max_procs) - 2;
@@ -355,6 +355,7 @@ inline auto Scheduler::get_coro_from_processor(Processor* processor) -> Handle
 inline auto Scheduler::get_coro_with_spinning(Processor* processor) -> Handle
 {
     std::vector<Handle> coros;
+    //
     if (coros = get_global_coroutine(max_local_queue_size / 2); coros.empty())
     {
         if (coros = steal_coroutine(processor); coros.empty() && processor->iocontext.has_work())
@@ -387,17 +388,21 @@ inline auto Scheduler::steal_coroutine(Processor* processor) -> std::vector<Hand
 {
     int rand_idx = randomer_.random(0, max_procs);
     // TODO:多几轮
-    for (int i = 0; i < max_procs; i++)
+    constexpr int max_rounds = 3;
+    for (int round = 0; round < max_rounds; round++)
     {
-        auto steal_processor = processors_[(i + rand_idx) % max_procs].get();
-        // 只窃取正在运行的P
-        if (steal_processor == processor || !(running_mask_.load() & (1 << steal_processor->id)))
+        for (int i = 0; i < max_procs; i++)
         {
-            continue;
-        }
-        if (auto coros = steal_processor->coros.pop_front_half(); !coros.empty())
-        {
-            return coros;
+            auto steal_processor = processors_[(i + rand_idx) % max_procs].get();
+            // 只窃取正在运行的P
+            if (steal_processor == processor || !(running_mask_.load() & (1 << steal_processor->id)))
+            {
+                continue;
+            }
+            if (auto coros = steal_processor->coros.pop_front_half(); !coros.empty())
+            {
+                return coros;
+            }
         }
     }
     for (int i = 0; i < max_procs; i++)

@@ -13,4 +13,8 @@ target_link_libraries(coroutine PUBLIC uring)
 set_target_properties(coroutine PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/lib
 )
+# ... 项目定义 ...
+
+add_subdirectory(benchmarks)
+
 add_subdirectory(test)

@@ -8,8 +8,8 @@ set(CMAKE_CXX_EXTENSIONS OFF) # 建议关闭扩展，保持标准兼容
 
 set(CMAKE_CXX_FLAGS_DEBUG "-g")
 set(CMAKE_CXX_FLAGS_RELEASE "-g -O3 -DNDEBUG")
-# add_subdirectory(module)
+add_subdirectory(module)
 add_subdirectory(coroutine)
 # add_subdirectory(tcp)
-# add_subdirectory(rpc)
-# add_subdirectory(http)
+add_subdirectory(rpc)
+add_subdirectory(http)

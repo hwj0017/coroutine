@@ -195,18 +195,9 @@ inline void Mutex::unlock()
         mtx_.unlock();  // 必须在此处释放自旋锁，防止 Predicate 里的业务代码死锁！
 
         bool accepted = false;
-        try
-        {
-            // 让协程评估自己是否真的要这把锁（判断 Predicate）
-            accepted = awaiter_to_resume->try_claim_lock();
-        }
-        catch (...)
-        {
-            mtx_.lock();
-            locked_ = false;
-            mtx_.unlock();
-            throw; // 防止用户传进来的 predicate 抛出异常导致锁状态崩坏
-        }
+
+        // 让协程评估自己是否真的要这把锁（判断 Predicate）
+        accepted = awaiter_to_resume->try_claim_lock();
 
         if (accepted)
         {
