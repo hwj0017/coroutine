@@ -20,6 +20,7 @@ template <std::invocable F> void co_spawn(F&& func, bool yield = false)
             f();
             delete this;
         }
+        void destroy() override { delete this; }
 
       private:
         DecayedF f;
