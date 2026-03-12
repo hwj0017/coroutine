@@ -1,3 +1,41 @@
+
+
+# Coroutine-Framework
+
+基于 **C++20 Coroutines** 和 **Linux io_uring** 的高性能异步框架。
+
+## 🌟 项目亮点
+
+* **轻量级调度**：采用 M:N 协程模型，支持 **Work-Stealing** 调度和 **RunNext** 缓存优化。
+* **异步 IO**：深度集成 **io_uring**，提供全异步的网络读写（Read/Write/Accept/Connect）。
+* **同步原语**：提供协程安全的 `Channel`（类 Go 设计）、`WaitGroup` 和 `Mutex`。
+
+## 🚀 性能表现 (Benchmark)
+
+在 Ubuntu (WSL2) 环境下，协程切换延迟表现极佳：
+
+* **单线程 Ping-Pong**: ~50 ns/op
+* **多线程 Ping-Pong**: ~300 ns/op 
+
+## 🛠️ 快速开始
+
+### 依赖环境
+
+* Linux Kernel >= 5.10 (需支持 io_uring)
+* GCC 11+ / Clang 13+
+* 库依赖: `liburing`
+
+### 编译
+
+```bash
+mkdir build && cd build
+cmake ..
+
+```
+
+## 💻 简单示例
+
+```cpp
 #include "coroutine/coroutine.h"
 #include "coroutine/main.h"
 #include "tcp/inetaddress.h"
@@ -32,3 +70,5 @@ auto utils::main_coro() -> MainCoroutine
     co_await server.start();
     co_return 0;
 }
+
+```

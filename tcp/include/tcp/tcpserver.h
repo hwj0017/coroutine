@@ -20,15 +20,7 @@ class TcpServer
     // 构造函数：初始化监听 Socket
     TcpServer(const InetAddress& addr) : server_addr_(addr)
     {
-        // 创建非阻塞的 IPv4 TCP Socket
-        int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-        if (fd < 0)
-        {
-            throw std::runtime_error("Failed to create listen socket");
-        }
-
-        // 赋予 Socket 对象管理权
-        listen_socket_ = Socket(fd);
+        listen_socket_ = Socket::create_tcp();
 
         // 设置 SO_REUSEADDR，防止服务端重启时报 "Address already in use"
         int opt = 1;
