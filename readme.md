@@ -16,6 +16,7 @@
 
 * **单线程 Ping-Pong**: ~50 ns/op
 * **多线程 Ping-Pong**: ~300 ns/op 
+目前只在思考为什么多线程这么慢
 
 ## 🛠️ 快速开始
 
@@ -32,7 +33,6 @@ mkdir build && cd build
 cmake ..
 
 ```
-
 ## 💻 简单示例
 
 ```cpp
