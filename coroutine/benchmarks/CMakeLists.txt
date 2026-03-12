@@ -42,3 +42,8 @@ target_include_directories(check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src ../i
 
 # 6. 设置输出名称，方便识别
 set_target_properties(manual_bench PROPERTIES OUTPUT_NAME "coro_bench_tool")
+
+add_executable(mem)
+target_sources(mem PRIVATE mem.cpp)
+target_include_directories(mem PRIVATE ../include)
+target_link_libraries(mem PRIVATE coroutine)

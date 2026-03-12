@@ -2,6 +2,7 @@
 
 #include "coroutine/coroutine.h"
 #include "coroutine/cospawn.h"
+#include "coroutine/syscall.h"
 #include <cassert>
 #include <coroutine>
 #include <cstddef>
@@ -37,9 +38,9 @@ template <typename T> class Channel
         auto await_resume() const { return state_; }
 
         auto get_value() { return std::move(value_); }
-        auto set_value()
+        auto set_value(State state)
         {
-            state_ = State::OK;
+            state_ = state;
             return promise_;
         }
 
@@ -74,10 +75,10 @@ template <typename T> class Channel
         {
             return state_;
         }
-        auto set_value(T&& value)
+        auto set_value(T&& value, State state)
         {
             value_ = std::move(value);
-            state_ = State::OK;
+            state_ = state;
             return promise_;
         }
 
@@ -102,7 +103,7 @@ template <typename T> class Channel
             resource_.push(std::monostate{});
         }
     }
-    ~Channel() {}
+    ~Channel() { close(); }
 
     auto recv() { return RecvAwaiter{this}; }
 
@@ -111,6 +112,29 @@ template <typename T> class Channel
         requires(std::is_same_v<T, std::monostate>)
     {
         return SendAwaiter{this, {}};
+    }
+    void close()
+    {
+        {
+            auto guard = std::lock_guard(mutex_);
+            if (is_closed_)
+            {
+                return;
+            }
+            is_closed_ = true;
+        }
+        while (!send_awaiters_.empty())
+        {
+            auto p = send_awaiters_.front()->set_value(State::CLOSED);
+            send_awaiters_.pop();
+            co_spawn(p);
+        }
+        while (!recv_awaiters_.empty())
+        {
+            auto p = recv_awaiters_.front()->set_value({}, State::CLOSED);
+            recv_awaiters_.pop();
+            co_spawn(p);
+        }
     }
 
   private:
@@ -150,11 +174,11 @@ template <typename T> bool Channel<T>::send_impl(SendAwaiter* send_awaiter)
         {
             auto recv_awaiter = recv_awaiters_.front();
             recv_awaiters_.pop();
-
-            notify = recv_awaiter->set_value(std::move(resource_.front()));
+            notify = recv_awaiter->set_value(std::move(resource_.front()), State::OK);
             resource_.pop();
         }
     }
+    send_awaiter->set_value(State::OK);
     if (notify)
     {
         co_spawn(notify);
@@ -184,9 +208,9 @@ template <typename T> bool Channel<T>::recv_impl(RecvAwaiter* recv_awaiter)
             auto send_awaiter = send_awaiters_.front();
             send_awaiters_.pop();
             resource_.push(send_awaiter->get_value());
-            notify = send_awaiter->set_value();
+            notify = send_awaiter->set_value(State::OK);
         }
-        recv_awaiter->set_value(std::move(resource_.front()));
+        recv_awaiter->set_value(std::move(resource_.front()), State::OK);
         resource_.pop();
     }
     if (notify)
@@ -204,7 +228,7 @@ template <> class Channel<void>
     {
       public:
         SendAwaiter(Channel<void>* channel) : channel_(channel) {}
-        bool await_ready() noexcept { return channel_->try_send(this); }
+        bool await_ready() noexcept { return false; }
         template <typename Promise> bool await_suspend(std::coroutine_handle<Promise> handle) noexcept
         {
             promise_ = &handle.promise();
@@ -212,9 +236,9 @@ template <> class Channel<void>
         }
 
         auto await_resume() const { return state_; }
-        auto set_value()
+        auto set_value(State state)
         {
-            state_ = State::OK;
+            state_ = state;
             return promise_;
         }
 
@@ -230,7 +254,7 @@ template <> class Channel<void>
 
       public:
         RecvAwaiter(Channel<void>* channel) : channel_(channel) {}
-        auto await_ready() noexcept { return channel_->try_recv(this); }
+        auto await_ready() noexcept { return false; }
 
         template <typename Promise> bool await_suspend(std::coroutine_handle<Promise> handle) noexcept
         {
@@ -239,9 +263,9 @@ template <> class Channel<void>
         }
 
         auto await_resume() const { return state_; }
-        auto set_value()
+        auto set_value(State state)
         {
-            state_ = State::OK;
+            state_ = state;
             return promise_;
         }
 
@@ -254,8 +278,30 @@ template <> class Channel<void>
     {
         assert(initial_size <= capacity);
     }
-    ~Channel() {}
-
+    ~Channel() { close(); }
+    void close()
+    {
+        {
+            auto guard = std::lock_guard(mutex_);
+            if (is_closed_)
+            {
+                return;
+            }
+            is_closed_ = true;
+        }
+        while (!send_awaiters_.empty())
+        {
+            auto p = send_awaiters_.front()->set_value(State::CLOSED);
+            send_awaiters_.pop();
+            co_spawn(p);
+        }
+        while (!recv_awaiters_.empty())
+        {
+            auto p = recv_awaiters_.front()->set_value(State::CLOSED);
+            recv_awaiters_.pop();
+            co_spawn(p);
+        }
+    }
     auto recv() { return RecvAwaiter{this}; }
 
     auto send() { return SendAwaiter{this}; }
@@ -298,9 +344,10 @@ inline bool Channel<void>::send_impl(SendAwaiter* send_awaiter)
         {
             auto recv_awaiter = recv_awaiters_.front();
             recv_awaiters_.pop();
-            notify = recv_awaiter->set_value();
+            notify = recv_awaiter->set_value(State::OK);
             size_--;
         }
+        send_awaiter->set_value(State::OK);
     }
     if (notify)
     {
@@ -331,9 +378,9 @@ inline bool Channel<void>::recv_impl(RecvAwaiter* recv_awaiter)
             auto send_awaiter = send_awaiters_.front();
             send_awaiters_.pop();
             size_++;
-            notify = send_awaiter->set_value();
+            notify = send_awaiter->set_value(State::OK);
         }
-        recv_awaiter->set_value();
+        recv_awaiter->set_value(State::OK);
         size_--;
     }
     if (notify)
@@ -342,77 +389,5 @@ inline bool Channel<void>::recv_impl(RecvAwaiter* recv_awaiter)
     }
     return false;
 }
-inline bool Channel<void>::try_send(SendAwaiter* awaiter)
-{
-    Promise* notify = nullptr;
-    bool success = false;
-    // 灵魂一步：尝试拿锁。拿不到立刻放弃，绝不陷入内核等待！
-    {
-        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
-        if (!lock.owns_lock())
-        {
-            return false;
-        }
 
-        if (is_closed())
-        {
-            success = true;
-        }
-        else if (!recv_awaiters_.empty())
-        {
-            // 直接空中交接，省去 size_ 加减
-            auto recv = recv_awaiters_.front();
-            recv_awaiters_.pop();
-            notify = recv->set_value();
-            success = true;
-        }
-        else if (size_ < capacity_)
-        {
-            size_++;
-            success = true;
-        }
-    }
-
-    if (notify)
-    {
-        co_spawn(notify);
-    }
-    return success; // 返回 true 则完美绕过协程挂起
-}
-
-inline bool Channel<void>::try_recv(RecvAwaiter* awaiter)
-{
-    Promise* notify = nullptr;
-    bool success = false;
-    {
-        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
-        if (!lock.owns_lock())
-        {
-            return false;
-        }
-
-        if (is_closed() && is_empty())
-        {
-            success = true;
-        }
-        else if (!send_awaiters_.empty())
-        {
-            auto sender = send_awaiters_.front();
-            send_awaiters_.pop();
-            notify = sender->set_value();
-            success = true;
-        }
-        else if (size_ > 0)
-        {
-            size_--;
-            success = true;
-        }
-    }
-
-    if (notify)
-    {
-        co_spawn(notify);
-    }
-    return success;
-}
 } // namespace utils
