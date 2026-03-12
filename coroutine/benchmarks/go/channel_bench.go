@@ -2,12 +2,44 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 )
 
-// --- 实验 1: Ping-Pong 延迟 (1v1 强同步) ---
-// 测试单次上下文切换 + Channel 发送/接收的开销
+// =====================================================================
+// 实验 1: 海量协程创建与频繁 Yield (测试纯粹的状态机上下文切换开销)
+// =====================================================================
+func benchmarkYield(numRoutines, numYields int) {
+	var wg sync.WaitGroup
+	wg.Add(numRoutines)
+
+	start := time.Now()
+
+	for i := 0; i < numRoutines; i++ {
+		go func() {
+			defer wg.Done()
+			// 循环主动让出执行权，模拟密集型调度
+			for j := 0; j < numYields; j++ {
+				runtime.Gosched()
+			}
+		}()
+	}
+
+	wg.Wait()
+	elapsed := time.Since(start)
+	totalSwitches := int64(numRoutines * numYields)
+
+	fmt.Printf("[1] Yield Context Switch Benchmark\n")
+	fmt.Printf("    Goroutines created : %d\n", numRoutines)
+	fmt.Printf("    Yields per routine : %d\n", numYields)
+	fmt.Printf("    Total switches     : %d\n", totalSwitches)
+	fmt.Printf("    Time per switch    : %d ns\n\n", elapsed.Nanoseconds()/totalSwitches)
+}
+
+// =====================================================================
+// 实验 2: Ping-Pong 延迟 (测试无缓冲 Channel 1v1 强同步下的唤醒开销)
+// =====================================================================
 func benchmarkPingPong(n int) {
 	chanA := make(chan int) // 无缓冲 channel
 	chanB := make(chan int)
@@ -25,15 +57,19 @@ func benchmarkPingPong(n int) {
 	for i := 0; i < n; i++ {
 		chanA <- 1
 		res := <-chanB
-		_ = res // Go 中忽略变量直接用 _, 编译器通常不会过度优化掉 channel 接收动作，因为它有副作用
+		_ = res
 	}
 
 	totalNs := time.Since(start).Nanoseconds()
-	fmt.Printf("Ping-Pong: %d ns/op (per switch)\n", totalNs/(int64(n)*2))
+	fmt.Printf("[2] Ping-Pong Latency Benchmark\n")
+	fmt.Printf("    Iterations       : %d\n", n)
+	// 一次完整的 Ping-Pong 包含两次切换 (A->B, B->A)
+	fmt.Printf("    Ping-Pong latency: %d ns/op (per switch)\n\n", totalNs/(int64(n)*2))
 }
 
-// --- 实验 2: MPMC 吞吐量 (多生产者多消费者) ---
-// 测试 Channel 在高竞争下的锁竞争或无锁性能
+// =====================================================================
+// 实验 3: MPMC 吞吐量 (测试有缓冲 Channel 在多协程激烈竞争下的表现)
+// =====================================================================
 func benchmarkThroughput(totalMsgs, pCount, cCount int) {
 	ch := make(chan int, 1024) // 有缓冲 channel
 
@@ -41,7 +77,6 @@ func benchmarkThroughput(totalMsgs, pCount, cCount int) {
 	pNum := totalMsgs / pCount
 
 	var wg sync.WaitGroup
-
 	start := time.Now()
 
 	// 启动消费者
@@ -67,25 +102,34 @@ func benchmarkThroughput(totalMsgs, pCount, cCount int) {
 		}(pNum)
 	}
 
-	// 等待所有生产者和消费者完成
 	wg.Wait()
-
-	// 修正了 C++ 版本中的小 Bug：这里应该在 Wait 之后计算时间，否则测出的只是发送任务的时间
 	elapsed := time.Since(start).Seconds()
-
-	// 使用 float64 进行计算，防止执行太快 time == 0 导致除以 0 崩溃，且结果更精确
 	msgsPerSec := float64(totalMsgs) / elapsed
-	fmt.Printf("Processed %.0f msgs/sec\n", msgsPerSec)
+
+	fmt.Printf("[3] MPMC Throughput Benchmark\n")
+	fmt.Printf("    Producers : %d\n", pCount)
+	fmt.Printf("    Consumers : %d\n", cCount)
+	fmt.Printf("    Total Msgs: %d\n", totalMsgs)
+	fmt.Printf("    Throughput: %.0f msgs/sec\n\n", msgsPerSec)
 }
 
 func main() {
-	fmt.Println("--- Starting Benchmarks (Go Goroutines) ---")
+	// ------------------------------------------------------------------
+	// 【关键配置】单核 vs 多核
+	// ------------------------------------------------------------------
+	// 如果你的无栈协程库是单线程调度器（Event Loop 模式），
+	// 请取消下面这行的注释，限制 Go 只使用 1 个逻辑 CPU。
+	// 这样才能保证对比环境的绝对公平（不引入操作系统线程间的锁竞争）。
+	//
+	// runtime.GOMAXPROCS(1)
+	// ------------------------------------------------------------------
 
-	// 1. 测试延迟
-	benchmarkPingPong(10000000)
+	fmt.Printf("=== Go Goroutine Benchmark Suite ===\n")
+	fmt.Printf("Current GOMAXPROCS (Logical Cores used): %d\n", runtime.GOMAXPROCS(0))
+	fmt.Printf("------------------------------------\n\n")
 
-	// 2. 测试吞吐 (16 生产者, 16 消费者)
-	// 结合我们之前聊过的，如果你的机器是 16 个逻辑核心，Go 默认的 GOMAXPROCS 就是 16，
-	// 这 32 个 Goroutine 会非常均匀地分布在你的 CPU 上激烈竞争。
-	benchmarkThroughput(10000000, 16, 16)
+	// 运行实验
+	benchmarkYield(1000000, 100)          // 100万协程，各切换100次
+	benchmarkPingPong(10000000)           // 1000万次互相发送接收
+	benchmarkThroughput(10000000, 16, 16) // 16生产16消费，共处理1000万消息
 }

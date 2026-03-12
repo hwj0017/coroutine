@@ -45,6 +45,7 @@ struct RpcServer::Impl
         while (true)
         {
             auto n = co_await session->read(buffer.writable_span(BufferSize));
+            std::cout << "read " << n << " bytes" << std::endl;
             if (n <= 0)
                 break;
             buffer.commit_write(n);
@@ -78,19 +79,20 @@ struct RpcServer::Impl
     {
 
         RpcMessage response;
-        response.header.sequence_id = msg.header.sequence_id;
-        response.method = std::move(msg.method);
 
         if (auto it = services_.find(msg.method); it == services_.end())
         {
-            response.header.status_code = 1;
+            response.header.set_status_code(1);
         }
         else
         {
             response.payload = it->second(std::move(msg.payload));
-            response.header.status_code = 0;
+            response.header.set_status_code(0);
         }
-
+        response.header.set_sequence_id(msg.header.get_sequence_id());
+        response.method = std::move(msg.method);
+        response.header.set_method_length(response.method.size());
+        response.header.set_body_length(response.payload.size());
         // 发送响应回客户端
         if (auto count = co_await session->send(response.string()); count != State::OK)
         {

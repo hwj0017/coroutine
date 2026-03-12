@@ -12,7 +12,12 @@ namespace utils
 class RpcClient
 {
   public:
-    RpcClient(std::string_view host, uint16_t port) : socket_(Socket::create_tcp()) {}
+    RpcClient(std::string_view host, uint16_t port)
+        : socket_(Socket::create_tcp()), server_addr_(port, host), pending_(1024)
+    {
+        co_spawn(write_worker());
+        co_spawn(read_worker());
+    }
 
     template <IsMessage R, IsMessage Arg> auto call(std::string method, const Arg& arg, R& reply) -> Coroutine<bool>;
 
@@ -33,7 +38,11 @@ class RpcClient
       public:
         ReadyAwaiter(RpcClient* client, uint64_t id) : client_(client), id_(id) {}
         auto await_ready() { return false; }
-        auto await_suspend(std::coroutine_handle<> handle) { return !client_->ready_impl(this); }
+        template <typename Promise> auto await_suspend(std::coroutine_handle<Promise> handle)
+        {
+            handle_ = &handle.promise();
+            return !client_->ready_impl(this);
+        }
         auto await_resume() const noexcept -> RpcResponse { return std::move(response_); }
         auto set_value(RpcResponse response_)
         {
@@ -52,6 +61,11 @@ class RpcClient
     bool ready_impl(ReadyAwaiter* awaiter)
     {
         auto guard = std::lock_guard<std::mutex>(mutex_);
+        if (is_closed_)
+        {
+            awaiter->response_.is_error = true;
+            return true;
+        }
         auto it = responses_.find(awaiter->id_);
         if (it == responses_.end())
         {
@@ -68,6 +82,7 @@ class RpcClient
     Socket socket_;
     InetAddress server_addr_;
     std::mutex mutex_;
+    bool is_closed_{false};
     std::atomic<bool> is_connected_ = false;
     Channel<RpcRequest> pending_;
     std::unordered_map<uint64_t, ReadyAwaiter*> awaiters_;
@@ -97,6 +112,7 @@ auto RpcClient::call(std::string method, const Arg& arg, R& reply) -> Coroutine<
     {
         co_return false;
     }
-    co_return static_cast<Message*>(&reply)->ParseFromString(response.payload);
+    auto err = static_cast<Message*>(&reply)->ParseFromString(response.payload);
+    co_return err;
 }
 } // namespace utils

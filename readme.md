@@ -33,6 +33,21 @@ mkdir build && cd build
 cmake ..
 
 ```
+### 测试报告
+
+| 🧪 测试维度 (Benchmark Scenarios) | 🐹 Go (Goroutines) | 🚀 C++ 无栈协程 (Your Lib) | 🏆 性能优势对比 |
+| --- | --- | --- | --- |
+| **[1] Yield 基础上下文切换**<br>
+
+<br>*(100万并发 / 纯状态机调度)* | 418 ns / op | **4 ns / op** | 🟢 **C++ 快 104.5 倍** |
+| **[2] Ping-Pong 通信延迟**<br>
+
+<br>*(1v1 强同步 / 挂起与唤醒)* | 144 ns / op | **46 ns / op** | 🟢 **C++ 快 3.1 倍** |
+| **[3] MPMC 并发极限吞吐量**<br>
+
+<br>*(16v16 高度竞争 / 消息分发)* | 22.12 M msgs/sec | **33.06 M msgs/sec** | 🟢 **C++ 领先 49.5%** |
+
+
 ## 💻 简单示例
 
 ```cpp

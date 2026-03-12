@@ -35,15 +35,15 @@ class RpcParser
         const RpcHeader* raw_header = reinterpret_cast<const RpcHeader*>(buffer.data());
 
         // 校验魔数
-        uint16_t magic = be16toh(raw_header->magic);
+        uint16_t magic = raw_header->get_magic();
         if (magic != RpcHeader::EXPECTED_MAGIC)
         {
             return RpcParseResult::Error;
         }
 
         // 3. 提取两个长度字段
-        uint32_t method_len = be32toh(raw_header->method_length);
-        uint32_t body_len = be32toh(raw_header->body_length);
+        uint32_t method_len = raw_header->get_method_length();
+        uint32_t body_len = raw_header->get_body_length();
 
         // 安全校验：防止 OOM 攻击
         if (method_len > MAX_META_SIZE || body_len > MAX_BODY_SIZE)
@@ -63,15 +63,7 @@ class RpcParser
         // --- 逻辑分水岭：数据已完整 ---
 
         // 6. 填充 Header 到输出对象
-        out_msg.header.magic = magic;
-        out_msg.header.version = raw_header->version;
-        out_msg.header.msg_type = raw_header->msg_type;
-        out_msg.header.serialize_type = raw_header->serialize_type;
-        out_msg.header.compress_type = raw_header->compress_type;
-        out_msg.header.status_code = be16toh(raw_header->status_code);
-        out_msg.header.sequence_id = be64toh(raw_header->sequence_id);
-        out_msg.header.method_length = method_len;
-        out_msg.header.body_length = body_len;
+        out_msg.header = *raw_header;
 
         // 7. 解析 method
         const char* method_ptr = buffer.data() + sizeof(RpcHeader);

@@ -2,6 +2,7 @@
 #include "coroutine/channel.h"
 #include "coroutine/coroutine.h"
 #include "socket.h"
+#include <iostream>
 #include <memory>
 namespace utils
 {
@@ -20,11 +21,12 @@ class RpcSession : public std::enable_shared_from_this<RpcSession>
             {
                 break;
             }
-
-            if (auto count = co_await session->socket_.write(data) < 0)
+            auto count = co_await session->socket_.write(data);
+            if (count < 0)
             {
                 break;
             }
+            std::cout << "write " << count << " bytes" << std::endl;
         }
     }
 

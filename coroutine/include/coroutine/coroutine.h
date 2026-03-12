@@ -35,6 +35,11 @@ class Promise : public ICallable
     void invoke() override { std::coroutine_handle<Promise>::from_promise(*this).resume(); }
     void destroy() override { std::coroutine_handle<Promise>::from_promise(*this).destroy(); }
     void set_awaiter(CoroutineBase* awaiter) { awaiter_ = awaiter; }
+    // auto operator new(size_t size) -> void*
+    // {
+    //     std::cout << "new coroutine" << size << std::endl;
+    //     return ::operator new(size);
+    // }
 
   protected:
     CoroutineBase* awaiter_{nullptr};

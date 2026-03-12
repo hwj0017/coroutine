@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <cerrno>
 #include <coroutine>
 #include <cstddef>
 #include <ctime>
@@ -35,7 +36,12 @@ class IOContext
         assert(event_count_ > 0);
         if (block)
         {
-            assert(io_uring_submit_and_wait(&ring_, 1) == unsubmitted_count_);
+            int ret = -EINTR;
+            while (ret == -EINTR)
+            {
+                ret = io_uring_submit_and_wait(&ring_, 1);
+            }
+            assert(ret == unsubmitted_count_);
             unsubmitted_count_ = 0;
         }
         else if (unsubmitted_count_ > 0)
