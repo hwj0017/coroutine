@@ -8,15 +8,16 @@
 
 * **轻量级调度**：采用 M:N 协程模型，支持 **Work-Stealing** 调度和 **RunNext** 缓存优化。
 * **异步 IO**：深度集成 **io_uring**，提供全异步的网络读写（Read/Write/Accept/Connect）。
-* **同步原语**：提供协程安全的 `Channel`（类 Go 设计）、`WaitGroup` 和 `Mutex`。
+* **同步原语**：提供协程安全的 `Channel`（类 Go 设计）、`WaitGroup`、`Mutex` 和 `ConditionVariable`。
 
 ## 🚀 性能表现 (Benchmark)
 
-在 Ubuntu (WSL2) 环境下，协程切换延迟表现极佳：
-
-* **单线程 Ping-Pong**: ~50 ns/op
-* **多线程 Ping-Pong**: ~300 ns/op 
-目前只在思考为什么多线程这么慢
+在 Ubuntu (WSL2) 环境下性能测试：
+| 🧪 测试维度 | 🐹 Go (Goroutines) | 🚀 C++ 无栈协程 | 🏆 性能优势对比 |
+| :--- | :--- | :--- | :--- |
+| **[1] Yield 切换**<br>(100万并发) | 418 ns / op | **4 ns / op** | 🟢 **C++ 快 104.5 倍** |
+| **[2] Ping-Pong 延迟**<br>(1v1 同步) | 144 ns / op | **46 ns / op** | 🟢 **C++ 快 3.1 倍** |
+| **[3] MPMC 吞吐量**<br>(16v16 竞争) | 22.12 M msgs/sec | **33.06 M msgs/sec** | 🟢 **C++ 领先 49.5%** |
 
 ## 🛠️ 快速开始
 
@@ -33,19 +34,8 @@ mkdir build && cd build
 cmake ..
 
 ```
-### 测试报告
 
-| 🧪 测试维度 (Benchmark Scenarios) | 🐹 Go (Goroutines) | 🚀 C++ 无栈协程 (Your Lib) | 🏆 性能优势对比 |
-| --- | --- | --- | --- |
-| **[1] Yield 基础上下文切换**<br>
 
-<br>*(100万并发 / 纯状态机调度)* | 418 ns / op | **4 ns / op** | 🟢 **C++ 快 104.5 倍** |
-| **[2] Ping-Pong 通信延迟**<br>
-
-<br>*(1v1 强同步 / 挂起与唤醒)* | 144 ns / op | **46 ns / op** | 🟢 **C++ 快 3.1 倍** |
-| **[3] MPMC 并发极限吞吐量**<br>
-
-<br>*(16v16 高度竞争 / 消息分发)* | 22.12 M msgs/sec | **33.06 M msgs/sec** | 🟢 **C++ 领先 49.5%** |
 
 
 ## 💻 简单示例
