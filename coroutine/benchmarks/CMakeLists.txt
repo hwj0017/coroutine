@@ -1,9 +1,5 @@
 # benchmarks/CMakeLists.txt
 
-# 1. 强制要求 C++20 (协程标准)
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
 # 2. 定义压测源文件
 set(BENCH_SOURCES
     main.cpp

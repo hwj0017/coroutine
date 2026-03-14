@@ -42,7 +42,6 @@ target_link_libraries(icallable PRIVATE coroutine)
 
 add_executable(leaktest)
 target_sources(leaktest PRIVATE leaktest.cpp)
-target_compile_options(leaktest PRIVATE -gdwarf-4)
 target_include_directories(leaktest PRIVATE ../include)
 target_link_libraries(leaktest PRIVATE coroutine)
 
