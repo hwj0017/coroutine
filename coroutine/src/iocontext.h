@@ -1,6 +1,6 @@
 #pragma once
 
-#include "coroutine/icallable.h"
+#include "coroutine/coroutine.h"
 #include "coroutine/syscall.h"
 #include <array>
 #include <atomic>
@@ -19,7 +19,7 @@
 #include <vector>
 namespace utils
 {
-using Handle = ICallable*;
+using Handle = Promise*;
 class Scheduler;
 class IOContext
 {

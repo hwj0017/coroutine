@@ -1,5 +1,4 @@
 #include "coroutine/coroutine.h"
-#include "coroutine/icallable.h"
 #include <atomic>
 #include <chrono>
 #include <coroutine>
@@ -55,8 +54,8 @@ struct Bench : public Timer
     }
     long val;
 };
-utils::ICallable* Ccall;
-void utils::co_spawn(utils::ICallable* call, bool yield) { Ccall = call; }
+utils::Promise* Ccall;
+void utils::co_spawn(utils::Promise* call, bool yield) { Ccall = call; }
 const int cSwitch = 100000000;
 
 auto foo() -> utils::Coroutine<>
@@ -76,11 +75,11 @@ int main()
 {
     auto coro = foo();
     utils::co_spawn(std::move(coro));
-    Ccall->invoke();
+    Ccall->resume();
 
     for (int i = 0; i < cSwitch; ++i)
     {
-        Ccall->invoke();
+        Ccall->resume();
     }
     printf("Done\n");
 }

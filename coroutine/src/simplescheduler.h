@@ -32,7 +32,7 @@ class SimpleScheduler
             {
                 auto coro = coros_.front();
                 coros_.pop();
-                coro->invoke();
+                coro->resume();
                 if (iocontext_.has_work() && ++resume_count >= poll_interval)
                 {
 

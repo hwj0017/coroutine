@@ -1,6 +1,5 @@
 #pragma once
 #include "coroutine/cospawn.h"
-#include "coroutine/icallable.h"
 #include <atomic>
 #include <cassert>
 #include <coroutine>
@@ -24,7 +23,7 @@ class YieldAwaiter
     void await_resume() const noexcept {}
 };
 class CoroutineBase;
-class Promise : public ICallable
+class Promise
 {
   public:
     Promise() = default;
@@ -32,8 +31,8 @@ class Promise : public ICallable
     auto final_suspend() noexcept { return std::suspend_never{}; };
     void unhandled_exception() { std::exit(-1); }
     auto yield_value(std::monostate value = {}) { return YieldAwaiter{}; }
-    void invoke() override { std::coroutine_handle<Promise>::from_promise(*this).resume(); }
-    void destroy() override { std::coroutine_handle<Promise>::from_promise(*this).destroy(); }
+    void resume() { std::coroutine_handle<Promise>::from_promise(*this).resume(); }
+    void destroy() { std::coroutine_handle<Promise>::from_promise(*this).destroy(); }
     void set_awaiter(CoroutineBase* awaiter) { awaiter_ = awaiter; }
     // auto operator new(size_t size) -> void*
     // {
@@ -44,7 +43,6 @@ class Promise : public ICallable
   protected:
     CoroutineBase* awaiter_{nullptr};
 };
-
 class CoroutineBase
 {
   public:
@@ -116,7 +114,7 @@ template <typename T> void Coroutine<T>::promise_type::return_value(T value)
     {
         if (auto promise = static_cast<Coroutine<T>*>(awaiter_)->set_value(std::move(value)); promise)
         {
-            co_spawn(promise);
+            promise->resume();
         }
     }
 }
@@ -143,7 +141,7 @@ inline void Coroutine<>::promise_type::return_void()
     {
         if (auto promise = static_cast<Coroutine<>*>(awaiter_)->set_value(); promise)
         {
-            co_spawn(promise);
+            promise->resume();
         }
     }
 }

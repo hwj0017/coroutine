@@ -1,6 +1,6 @@
 #pragma once
 #include "concurrentdeque.h"
-#include "coroutine/icallable.h"
+#include "coroutine/coroutine.h"
 #include "iocontext.h"
 #include "randomer.h"
 #include <atomic>
@@ -23,7 +23,7 @@
 
 namespace utils
 {
-using Handle = ICallable*;
+using Handle = Promise*;
 // Processor (P)
 class Processor
 {
@@ -170,7 +170,7 @@ inline void Scheduler::processor_func(Processor* p)
     {
         auto coro = get_coro();
         assert(coro);
-        coro->invoke();
+        coro->resume();
     }
 }
 

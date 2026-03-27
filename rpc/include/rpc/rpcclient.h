@@ -1,7 +1,6 @@
 #pragma once
 #include "coroutine/channel.h"
 #include "coroutine/coroutine.h"
-#include "coroutine/icallable.h"
 #include "rpc/message.h"
 #include "tcp/socket.h"
 #include <cstddef>
@@ -52,7 +51,7 @@ class RpcClient
 
       private:
         RpcClient* client_;
-        ICallable* handle_;
+        Promise* handle_;
         uint64_t id_;
         RpcResponse response_;
         friend class RpcClient;

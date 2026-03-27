@@ -1,7 +1,6 @@
 
 #include "rpc/rpcclient.h"
 #include "coroutine/coroutine.h"
-#include "coroutine/icallable.h"
 #include "rpcparser.h"
 #include "tcp/buffer.h"
 #include <cassert>
@@ -87,7 +86,7 @@ auto RpcClient::read_worker() -> Coroutine<>
             }
             else if (result == RpcParseResult::Success)
             {
-                ICallable* handle = nullptr;
+                Promise* handle = nullptr;
                 {
                     auto guard = std::lock_guard(mutex_);
                     auto id = msg.header.get_sequence_id();

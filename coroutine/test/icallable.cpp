@@ -17,10 +17,11 @@ auto main_coro() -> utils::MainCoroutine
     for (int i = 0; i < 4; i++)
     {
         wg.add(1);
-        co_spawn([&] {
+        co_spawn([&] -> Coroutine<> {
             std::cout << "hello\n";
             wg.done();
-        });
+            co_return;
+        }());
     }
     co_await wg.wait();
 
