@@ -415,9 +415,12 @@ inline auto Scheduler::steal_coroutine(Processor* processor) -> std::vector<Hand
             {
                 continue;
             }
-            if (auto coros = steal_processor->coros.pop_front_half(); !coros.empty())
+            while (!steal_processor->coros.empty())
             {
-                return coros;
+                if (auto coros = steal_processor->coros.pop_front_half(); !coros.empty())
+                {
+                    return coros;
+                }
             }
         }
     }
