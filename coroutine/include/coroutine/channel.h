@@ -2,7 +2,6 @@
 
 #include "coroutine/coroutine.h"
 #include "coroutine/cospawn.h"
-#include "coroutine/syscall.h"
 #include <cassert>
 #include <coroutine>
 #include <cstddef>
@@ -19,6 +18,7 @@ enum class State
     OK,
     CLOSED
 };
+
 template <typename T = void> class Channel;
 
 template <typename T> class Channel

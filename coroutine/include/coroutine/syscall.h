@@ -106,15 +106,10 @@ class WriteAwaiter : public SysAwaiter<WriteAwaiter>
 class DelayAwaiter : public SysAwaiter<DelayAwaiter>
 {
   public:
-    DelayAwaiter(double timeout)
-    {
-        ts_.tv_sec = timeout;
-        ts_.tv_nsec = (timeout - ts_.tv_sec) * 1e9;
-    }
+    DelayAwaiter(double timeout) : timeout_(timeout) {}
 
   private:
-    struct timespec ts_;
-
+    double timeout_;
     friend class IOContext;
     friend class Scheduler;
 };

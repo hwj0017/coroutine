@@ -48,6 +48,7 @@ class Processor
 class Scheduler
 {
   public:
+    static const size_t max_procs;
     Scheduler();
     ~Scheduler() = default;
     void co_spawn(Handle coro, bool yield = false);
@@ -58,7 +59,6 @@ class Scheduler
         static Scheduler* scheduler = new Scheduler();
         return *scheduler;
     }
-    static const int max_procs = 16;
 
   private:
     // M执行循环
@@ -118,6 +118,7 @@ class Scheduler
     // 最大自旋回合
     static constexpr size_t max_spinning_epoch = 10;
 };
+inline const size_t Scheduler::max_procs = std::thread::hardware_concurrency();
 
 inline thread_local Processor* Scheduler::current_processor_{nullptr};
 inline thread_local Randomer Scheduler::randomer_{};
@@ -188,15 +189,17 @@ inline auto Scheduler::get_coro() -> Handle
             {
                 return coro;
             }
+
             // 从掩码中删除
             running_mask_.fetch_and(~(1 << processor->id));
-
             if (can_spinning())
             {
                 processor->state = Processor::State::SPINNING;
             }
             else
             {
+                // 阻塞监听io
+                polling_mask_.fetch_or(1 << processor->id);
                 processor->state = Processor::State::POLLING;
             }
             break;
@@ -220,30 +223,37 @@ inline auto Scheduler::get_coro() -> Handle
                     return coro;
                 }
             }
+            // 阻塞监听io
+            polling_mask_.fetch_or(1 << processor->id);
             processor->state = Processor::State::POLLING;
             break;
         }
         case Processor::State::POLLING: {
+            // // 防止所有P同时POLLING导致饿死
+            if (need_spinning_.exchange(false))
+            {
+                polling_mask_.fetch_and(~(1 << processor->id));
+                processor->state = Processor::State::SPINNING;
+                break;
+            }
             // 阻塞监听io
-            polling_mask_.fetch_or(1 << processor->id);
             auto coros = processor->iocontext.poll(true);
-            polling_mask_.fetch_and(~(1 << processor->id));
+            // 找到任务
             if (auto it = coros.begin(); it != coros.end())
             {
                 auto coro = *it;
                 ++it;
                 add_coro_to_processor({it, coros.end()}, processor);
                 processor->state = Processor::State::RUNNING;
+                polling_mask_.fetch_and(~(1 << processor->id));
                 running_mask_.fetch_or(1 << processor->id);
                 return coro;
             }
+            // 没有任务
             if (can_spinning())
             {
+                polling_mask_.fetch_and(~(1 << processor->id));
                 processor->state = Processor::State::SPINNING;
-            }
-            else
-            {
-                processor->state = Processor::State::POLLING;
             }
             break;
         }

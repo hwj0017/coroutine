@@ -95,7 +95,8 @@ bool RouterNode::insert(std::string_view path, HttpHandler& handler)
     auto node = std::make_unique<RouterNode>();
     node->path_part_ = std::move(part_path_str);
     node->type_ = NodeType::STATIC;
-    assert(node->insert(left_path, handler));
+    auto ret = node->insert(left_path, handler);
+    assert(ret);
     children_.emplace(std::move(part_path_str), std::move(node));
     return true;
 }

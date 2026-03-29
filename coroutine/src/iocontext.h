@@ -2,6 +2,7 @@
 
 #include "coroutine/coroutine.h"
 #include "coroutine/syscall.h"
+#include "timewheel.h"
 #include <array>
 #include <atomic>
 #include <cassert>
@@ -34,23 +35,38 @@ class IOContext
     auto poll(bool block) -> std::vector<Handle>
     {
         assert(event_count_ > 0);
-        if (block)
+        if (unsubmitted_count_ > 0)
         {
-            int ret = -EINTR;
-            while (ret == -EINTR)
-            {
-                ret = io_uring_submit_and_wait(&ring_, 1);
-            }
+            auto ret = io_uring_submit(&ring_);
             assert(ret == unsubmitted_count_);
             unsubmitted_count_ = 0;
         }
-        else if (unsubmitted_count_ > 0)
+        if (block)
         {
-            assert(io_uring_submit(&ring_) == unsubmitted_count_);
-            unsubmitted_count_ = 0;
+            int next_timeout_ms = timer_wheel_.get_next_timeout();
+            struct __kernel_timespec ts;
+            struct __kernel_timespec* ts_ptr = nullptr;
+            if (next_timeout_ms >= 0)
+            {
+                // 将总毫秒数拆分成“秒”和“纳秒”
+                ts.tv_sec = next_timeout_ms / 1000;
+
+                // 注意这里要乘以 1000000LL，把余下的毫秒转成纳秒
+                ts.tv_nsec = (next_timeout_ms % 1000) * 1000000LL;
+
+                // 指针指向结构体，表示我们要开启超时等待
+                ts_ptr = &ts;
+            }
+            struct io_uring_cqe* cqe = nullptr;
+            int ret = -EINTR;
+            while (ret == -EINTR)
+            {
+                ret = io_uring_wait_cqe_timeout(&ring_, &cqe, ts_ptr);
+                // ret = io_uring_submit_and_wait(&ring_, 1);
+            }
         }
+
         std::vector<Handle> coroutines;
-        bool wake_up = false;
         int finished_count = 0;
         unsigned head;
         struct io_uring_cqe* cqe;
@@ -61,7 +77,7 @@ class IOContext
             auto awaiter = reinterpret_cast<SysAwaiterBase*>(cqe->user_data);
             if (awaiter == &eventfd_awaiter_)
             {
-                wake_up = true;
+                reset_eventfd();
             }
             else
             {
@@ -76,11 +92,6 @@ class IOContext
         {
             io_uring_cq_advance(&ring_, finished_count);
             event_count_ -= finished_count;
-            // 包含eventfd的IO操作
-            if (wake_up)
-            {
-                reset_eventfd();
-            }
             // 处理pending的函数
             while (event_count_ < entries && !pending_call_.empty())
             {
@@ -89,13 +100,20 @@ class IOContext
                 func();
             }
         }
+        auto ready = timer_wheel_.update();
+        for (auto timer : ready)
+        {
+            auto handle = static_cast<DelayAwaiter*>(timer)->set_value(0);
+            coroutines.push_back(handle);
+        }
         return coroutines;
     }
     void reset_eventfd();
     void wake()
     {
         uint64_t val = 1;
-        assert(::write(eventfd_, &val, sizeof(val)) == sizeof(val));
+        auto ret = ::write(eventfd_, &val, sizeof(val));
+        assert(ret == sizeof(val));
     }
     template <typename Awaiter>
     bool process(Awaiter* awaiter)
@@ -113,7 +131,7 @@ class IOContext
     int eventfd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     uint64_t eventfd_buf_ = 0;
     ReadAwaiter eventfd_awaiter_{};
-
+    BitwiseTimerWheel timer_wheel_{MS(1), std::vector<size_t>{8, 6, 6, 6, 6}};
     // eventfd_ read 的缓冲区
     std::queue<std::function<void()>> pending_call_{};
     size_t event_count_ = 0;
@@ -146,6 +164,12 @@ template <typename Awaiter>
 bool IOContext::process_impl(Awaiter* awaiter)
     requires(std::is_base_of_v<SysAwaiterBase, Awaiter>)
 {
+    if constexpr (std::is_same_v<DelayAwaiter, Awaiter>)
+    {
+        awaiter = static_cast<DelayAwaiter*>(awaiter);
+        timer_wheel_.add_timer(MS(size_t(awaiter->timeout_ * 1000)), awaiter);
+        return true;
+    }
     auto sqe = io_uring_get_sqe(&ring_);
     assert(sqe);
     // 如果Syscall是AcceptAwaiter，则调用accept()
@@ -169,18 +193,14 @@ bool IOContext::process_impl(Awaiter* awaiter)
         awaiter = static_cast<WriteAwaiter*>(awaiter);
         io_uring_prep_write(sqe, awaiter->fd_, awaiter->buf_, awaiter->nbytes_, 0);
     }
-    else if constexpr (std::is_same_v<DelayAwaiter, Awaiter>)
-    {
-        awaiter = static_cast<DelayAwaiter*>(awaiter);
-        io_uring_prep_timeout(sqe, reinterpret_cast<__kernel_timespec*>(&awaiter->ts_), 0, 0);
-    }
 
     // 先设置请求在设置user_data
     sqe->user_data = reinterpret_cast<uintptr_t>(awaiter);
     ++event_count_;
     if (++unsubmitted_count_ >= submit_interval)
     {
-        assert(io_uring_submit(&ring_) == unsubmitted_count_);
+        auto ret = io_uring_submit(&ring_);
+        assert(ret == unsubmitted_count_);
         unsubmitted_count_ = 0;
     }
     return true;
