@@ -2,6 +2,7 @@
 
 #include "coroutine/coroutine.h"
 #include "coroutine/cospawn.h"
+#include "coroutine/spinlock.h"
 #include <cassert>
 #include <coroutine>
 #include <cstddef>
@@ -13,6 +14,7 @@
 
 namespace utils
 {
+using Lock = std::mutex;
 enum class State
 {
     OK,
@@ -144,7 +146,7 @@ template <typename T> class Channel
     bool is_empty() const { return resource_.empty() && send_awaiters_.empty(); }
     bool is_full() const { return resource_.size() >= capacity_ && recv_awaiters_.empty(); }
 
-    std::mutex mutex_{};
+    Lock mutex_{};
     size_t capacity_{};
     std::queue<T> resource_{};
     std::queue<SendAwaiter*> send_awaiters_;
@@ -315,7 +317,7 @@ template <> class Channel<void>
     bool is_empty() const { return size_ == 0 && send_awaiters_.empty(); }
     bool is_full() const { return size_ >= capacity_ && recv_awaiters_.empty(); }
 
-    std::mutex mutex_{};
+    Lock mutex_{};
     size_t capacity_{};
     size_t size_{};
     std::queue<SendAwaiter*> send_awaiters_;

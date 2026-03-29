@@ -1,6 +1,7 @@
 #pragma once
 #include "concurrentdeque.h"
 #include "coroutine/coroutine.h"
+#include "coroutine/spinlock.h"
 #include "iocontext.h"
 #include "randomer.h"
 #include <atomic>
@@ -23,6 +24,7 @@
 
 namespace utils
 {
+using Lock = std::mutex;
 using Handle = Promise*;
 // Processor (P)
 class Processor
@@ -83,11 +85,10 @@ class Scheduler
     const std::vector<std::unique_ptr<Processor>> processors_;
     // 全局队列
     std::deque<Handle> global_coros_{};
-    std::mutex global_coros_mtx_{};
+    Lock global_coros_mtx_{};
 
     // 全局锁
-    std::mutex global_mtx_{};
-
+    std::atomic<size_t> global_coros_count_{0};
     // 一些原子变量加快访问速度
     // idle P 掩码
     std::atomic_uint32_t idle_mask_{0};
@@ -289,12 +290,6 @@ inline void Scheduler::need_spinning()
     }
 }
 
-inline void Scheduler::add_global_coroutine(std::span<Handle> coros)
-{
-    std::lock_guard<std::mutex> lock(global_coros_mtx_);
-    global_coros_.insert(global_coros_.end(), coros.begin(), coros.end());
-}
-
 // TODO:yield
 inline void Scheduler::add_coro_to_processor(Handle coro, Processor* processor, bool yield)
 {
@@ -383,14 +378,25 @@ inline auto Scheduler::get_coro_with_spinning(Processor* processor) -> Handle
     return {};
 }
 
+inline void Scheduler::add_global_coroutine(std::span<Handle> coros)
+{
+    std::lock_guard<Lock> lock(global_coros_mtx_);
+    global_coros_.insert(global_coros_.end(), coros.begin(), coros.end());
+    global_coros_count_.fetch_add(coros.size());
+}
 inline auto Scheduler::get_global_coroutine(size_t max_count) -> std::vector<Handle>
 {
+    if (global_coros_count_.load() == 0)
+    {
+        return {};
+    }
     std::vector<Handle> coros;
-    std::lock_guard<std::mutex> lock(global_coros_mtx_);
+    std::lock_guard<Lock> lock(global_coros_mtx_);
     auto get_coros_size = std::min(std::min(global_coros_.size() / max_procs + 1, global_coros_.size()), max_count);
     coros.reserve(get_coros_size);
     coros.insert(coros.end(), global_coros_.begin(), global_coros_.begin() + get_coros_size);
     global_coros_.erase(global_coros_.begin(), global_coros_.begin() + get_coros_size);
+    global_coros_count_.fetch_sub(get_coros_size);
     return coros;
 }
 

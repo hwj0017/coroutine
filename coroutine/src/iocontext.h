@@ -35,14 +35,14 @@ class IOContext
     auto poll(bool block) -> std::vector<Handle>
     {
         assert(event_count_ > 0);
-        if (unsubmitted_count_ > 0)
-        {
-            auto ret = io_uring_submit(&ring_);
-            assert(ret == unsubmitted_count_);
-            unsubmitted_count_ = 0;
-        }
         if (block)
         {
+            if (unsubmitted_count_ > 0)
+            {
+                auto ret = io_uring_submit(&ring_);
+                assert(ret == unsubmitted_count_);
+                unsubmitted_count_ = 0;
+            }
             int next_timeout_ms = timer_wheel_.get_next_timeout();
             struct __kernel_timespec ts;
             struct __kernel_timespec* ts_ptr = nullptr;
