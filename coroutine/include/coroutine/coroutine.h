@@ -34,6 +34,7 @@ class Promise
     void resume() { std::coroutine_handle<Promise>::from_promise(*this).resume(); }
     void destroy() { std::coroutine_handle<Promise>::from_promise(*this).destroy(); }
     void set_awaiter(CoroutineBase* awaiter) { awaiter_ = awaiter; }
+
     // auto operator new(size_t size) -> void*
     // {
     //     std::cout << "new coroutine" << size << std::endl;
@@ -42,6 +43,9 @@ class Promise
 
   protected:
     CoroutineBase* awaiter_{nullptr};
+    // 用于实现侵入式链表
+    Promise* next_{};
+    friend class CoroQueue;
 };
 class CoroutineBase
 {
@@ -114,7 +118,7 @@ template <typename T> void Coroutine<T>::promise_type::return_value(T value)
     {
         if (auto promise = static_cast<Coroutine<T>*>(awaiter_)->set_value(std::move(value)); promise)
         {
-            promise->resume();
+            co_spawn(promise);
         }
     }
 }
@@ -141,24 +145,49 @@ inline void Coroutine<>::promise_type::return_void()
     {
         if (auto promise = static_cast<Coroutine<>*>(awaiter_)->set_value(); promise)
         {
-            promise->resume();
+            co_spawn(promise);
         }
     }
 }
 
-class MainCoroutine : public CoroutineBase
+// 侵入式链表
+class CoroQueue
 {
+  private:
+    Promise* head_{};
+    Promise* tail_{};
+    size_t size_{};
+
   public:
-    class promise_type : public Promise
+    CoroQueue() = default;
+    void push(Promise* promise)
     {
-      public:
-        auto get_return_object() -> MainCoroutine { return MainCoroutine(this); }
-        void return_value(int value)
+        if (tail_)
         {
-            destroy();
-            std::exit(value);
+            tail_->next_ = promise;
         }
-    };
-    MainCoroutine(promise_type* promise) : CoroutineBase(promise) {}
+        else
+        {
+            head_ = promise;
+        }
+        tail_ = promise;
+        ++size_;
+    }
+    Promise* pop()
+    {
+        if (!head_)
+        {
+            return nullptr;
+        }
+        auto promise = head_;
+        head_ = head_->next_;
+        if (!head_)
+        {
+            tail_ = nullptr;
+        }
+        --size_;
+        return promise;
+    }
+    bool empty() const { return size_ == 0; }
 };
 } // namespace utils

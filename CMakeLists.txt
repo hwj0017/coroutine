@@ -9,6 +9,15 @@ set(CMAKE_CXX_EXTENSIONS OFF) # 建议关闭扩展，保持标准兼容
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_CXX_FLAGS_DEBUG "-g")
 set(CMAKE_CXX_FLAGS_RELEASE "-g -O3 -DNDEBUG")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    message(STATUS "Enable AddressSanitizer (ASan)")
+
+    # 1. 增加编译选项
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+
+    # 2. 增加链接选项（ASan 必须链接运行时库）
+    add_link_options(-fsanitize=address)
+endif()
 add_subdirectory(coroutine)
 add_subdirectory(tcp)
 add_subdirectory(rpc)

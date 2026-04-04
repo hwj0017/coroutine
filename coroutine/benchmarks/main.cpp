@@ -132,7 +132,7 @@ auto benchmark_throughput(int total_msgs, int p_count, int c_count) -> Coroutine
     std::cout << "    Throughput: " << std::fixed << std::setprecision(0) << msgs_per_sec << " msgs/sec\n\n";
 }
 
-auto main_coro() -> utils::MainCoroutine
+auto main_coro() -> utils::Coroutine<int>
 {
     std::cout << "=== C++ Stackless Coroutine Benchmark Suite ===\n\n";
 
@@ -147,6 +147,6 @@ auto main_coro() -> utils::MainCoroutine
     // 如果支持多线程 Work-Stealing 调度，则会对标 Go 的 GOMAXPROCS>1 场景。
     co_await benchmark_throughput(10000000, 16, 16);
 
-    co_return 0; // 或者不返回，取决于 MainCoroutine 的实现
+    co_return 0; // 或者不返回，取决于 Coroutine<int> 的实现
 }
 } // namespace utils

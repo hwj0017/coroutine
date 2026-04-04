@@ -1,3 +1,4 @@
+#pragma once
 #include "coroutine/coroutine.h"
 #include "coroutine/cospawn.h"
 #include <atomic>
@@ -67,6 +68,15 @@ class WaitGroup::Waiter
     auto set_value() { return promise_; }
 };
 
+class DoneGuard
+{
+  private:
+    WaitGroup& wg_;
+
+  public:
+    DoneGuard(WaitGroup& wg) : wg_(wg) {}
+    ~DoneGuard() { wg_.done(); }
+};
 inline void WaitGroup::resume_all()
 {
     {

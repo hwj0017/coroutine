@@ -1,26 +1,36 @@
 
 #include "rpc/rpcclient.h"
 #include "coroutine/coroutine.h"
+#include "coroutine/waitgroup.h"
 #include "rpcparser.h"
 #include "tcp/buffer.h"
 #include <cassert>
 #include <endian.h>
 #include <iostream>
+#include <ostream>
 #include <vector>
 namespace utils
 {
 auto RpcClient::write_worker() -> Coroutine<>
 {
+    DoneGuard guard{wg_};
+    if (!is_connected_.exchange(true))
+    {
+        if (auto res = co_await socket_.connect(server_addr_); res < 0)
+        {
+            co_return;
+        }
+    }
     while (true)
     {
         auto [req, state] = co_await pending_.recv();
         if (state != State::OK)
         {
-            co_return;
+            break;
         }
         RpcMessage msg;
         // TODO
-        msg.header.set_sequence_id(sequence_id_);
+        msg.header.set_sequence_id(req.sequence_id);
         msg.header.set_method_length(req.method.size());
         msg.header.set_body_length(req.payload.size());
 
@@ -31,13 +41,20 @@ auto RpcClient::write_worker() -> Coroutine<>
         auto count = co_await socket_.write(str);
         if (count < 0)
         {
-            co_return;
+            break;
         }
-        std::cout << "write " << count << " bytes" << std::endl;
     }
 }
 auto RpcClient::read_worker() -> Coroutine<>
 {
+    DoneGuard guard{wg_};
+    if (!is_connected_.exchange(true))
+    {
+        if (auto res = co_await socket_.connect(server_addr_); res < 0)
+        {
+            co_return;
+        }
+    }
     constexpr size_t BufferSize = 1024;
     Buffer buffer;
     RpcParser parser;
@@ -48,7 +65,6 @@ auto RpcClient::read_worker() -> Coroutine<>
         // 1. 动态扩容并读取网络数据 (避免局部 temp_buffer 拷贝)
 
         auto n = co_await socket_.read(buffer.writable_span(BufferSize));
-        std::cout << "read " << n << " bytes" << std::endl;
         if (n <= 0)
             break;
         buffer.commit_write(n);
@@ -60,6 +76,7 @@ auto RpcClient::read_worker() -> Coroutine<>
 
             if (result == RpcParseResult::Error)
             {
+                std::println(std::cout, "Protocol error, closing connection");
                 // 协议错误，立刻断开连接
                 socket_.close();
                 std::vector<ReadyAwaiter*> awaiters;
@@ -77,7 +94,7 @@ auto RpcClient::read_worker() -> Coroutine<>
                     assert(handle);
                     co_spawn(handle);
                 }
-                co_return;
+                break;
             }
             else if (result == RpcParseResult::Incomplete)
             {
@@ -110,5 +127,4 @@ auto RpcClient::read_worker() -> Coroutine<>
         }
     }
 }
-
 } // namespace utils

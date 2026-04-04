@@ -8,8 +8,5 @@ add_library(http STATIC ${COROUTINE_SOURCES})
 # 设置头文件目录
 target_include_directories(http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/tcp/include ${CMAKE_SOURCE_DIR}/coroutine/include)
 target_link_libraries(http PUBLIC coroutine)
-# 为特定目标设置输出路径（可选，如果上面的全局设置不生效）
-set_target_properties(http PROPERTIES
-    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/lib
-)
+
 add_subdirectory(test)

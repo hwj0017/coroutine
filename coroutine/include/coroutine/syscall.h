@@ -10,22 +10,34 @@
 #include <unistd.h>
 namespace utils
 {
+
 class IOContext;
 template <typename T> bool process(T* awaiter);
 class SysAwaiterBase
 {
   public:
+    enum class Type
+    {
+        None,
+        Write,
+        Read,
+        Delay,
+        Accept,
+        Connect
+    };
     bool await_ready() const noexcept { return false; }
     int await_resume() const noexcept { return result_; }
-    auto set_value(int result)
+    virtual auto set_value(int result) -> Promise*
     {
         result_ = result;
         return promise_;
     }
 
   protected:
-    int result_;
-    Promise* promise_;
+    int result_{0};
+    Type type{SysAwaiterBase::Type::None};
+    Promise* promise_{nullptr};
+    friend class IOContext;
 };
 template <typename T> class SysAwaiter : public SysAwaiterBase
 {
@@ -55,7 +67,10 @@ class ConnectAwaiter : public SysAwaiter<ConnectAwaiter>
 class AcceptAwaiter : public SysAwaiter<AcceptAwaiter>
 {
   public:
-    AcceptAwaiter(int sockfd, sockaddr* addr, socklen_t* addrlen) : sockfd_(sockfd), addr_(addr), addrlen_(addrlen) {}
+    AcceptAwaiter(int sockfd, sockaddr* addr, socklen_t* addrlen) : sockfd_(sockfd), addr_(addr), addrlen_(addrlen)
+    {
+        type = Type::Accept;
+    }
 
   private:
     int sockfd_;
@@ -67,8 +82,7 @@ class AcceptAwaiter : public SysAwaiter<AcceptAwaiter>
 class ReadAwaiter : public SysAwaiter<ReadAwaiter>
 {
   public:
-    ReadAwaiter() = default;
-    ReadAwaiter(int fd, void* buf, size_t nbytes) : fd_(fd), buf_(buf), nbytes_(nbytes) {}
+    ReadAwaiter(int fd, void* buf, size_t nbytes) : fd_(fd), buf_(buf), nbytes_(nbytes) { type = Type::Read; }
 
   protected:
     int fd_;
@@ -80,9 +94,9 @@ class ReadAwaiter : public SysAwaiter<ReadAwaiter>
 class FileReadAwaiter : public ReadAwaiter
 {
   public:
-    FileReadAwaiter(std::string_view file_path, void* buf, size_t nbytes) : ReadAwaiter(-1, buf, nbytes)
+    FileReadAwaiter(std::string_view file_path, void* buf, size_t nbytes)
+        : ReadAwaiter(open(file_path.data(), O_RDONLY), buf, nbytes)
     {
-        fd_ = open(file_path.data(), O_RDONLY);
     }
     ~FileReadAwaiter()
     {
@@ -94,7 +108,25 @@ class FileReadAwaiter : public ReadAwaiter
 class WriteAwaiter : public SysAwaiter<WriteAwaiter>
 {
   public:
-    WriteAwaiter(int fd, const void* buf, size_t nbytes) : fd_(fd), buf_(buf), nbytes_(nbytes) {}
+    WriteAwaiter(int fd, const void* buf, size_t nbytes) : fd_(fd), buf_(buf), nbytes_(nbytes) { type = Type::Write; }
+    auto set_value(int result) -> Promise* override
+    {
+        if (result <= 0)
+        {
+            return promise_;
+        }
+        // 如果是部分写入，继续写剩余数据
+        buf_ = static_cast<const char*>(buf_) + result;
+        nbytes_ -= result;
+        result_ += result;
+        if (nbytes_ == 0)
+        {
+            return promise_;
+        }
+        process(this);
+        return nullptr; // 不立即恢复，等待下一次写入完成
+        // return SysAwaiterBase::set_value(result);
+    }
 
   private:
     int fd_;
@@ -106,7 +138,7 @@ class WriteAwaiter : public SysAwaiter<WriteAwaiter>
 class DelayAwaiter : public SysAwaiter<DelayAwaiter>
 {
   public:
-    DelayAwaiter(double timeout) : timeout_(timeout) {}
+    DelayAwaiter(double timeout) : timeout_(timeout) { type = Type::Delay; }
 
   private:
     double timeout_;

@@ -59,7 +59,7 @@ Coroutine<> consumer(int id)
     co_await ch.send();
 }
 
-auto main_coro() -> MainCoroutine
+auto main_coro() -> Coroutine<int>
 {
     co_spawn(producer(1));
     co_spawn(consumer(1));

@@ -3,7 +3,7 @@
 #include "coroutine/main.h"
 #include "service.pb.h"
 #include <iostream>
-auto utils::main_coro() -> MainCoroutine
+auto utils::main_coro() -> Coroutine<int>
 {
     std::cout << "start" << std::endl;
     RpcClient server("127.0.0.1", 8888);
@@ -14,5 +14,6 @@ auto utils::main_coro() -> MainCoroutine
     {
         std::cout << res.data() << std::endl;
     }
+    co_await server.join();
     co_return 0;
 }

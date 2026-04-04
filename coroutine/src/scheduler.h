@@ -24,7 +24,6 @@
 
 namespace utils
 {
-using Lock = std::mutex;
 using Handle = Promise*;
 // Processor (P)
 class Processor
@@ -44,12 +43,15 @@ class Processor
     std::atomic<Handle> run_next{};
     IOContext iocontext{};
     WorkStealingDeque<Handle> coros;
+    int local_count_{0};
     // 是否自旋
     State state{State::SPINNING};
 };
 class Scheduler
 {
   public:
+    using Lock = std::mutex;
+
     static const size_t max_procs;
     Scheduler();
     ~Scheduler() = default;
@@ -91,11 +93,11 @@ class Scheduler
     std::atomic<size_t> global_coros_count_{0};
     // 一些原子变量加快访问速度
     // idle P 掩码
-    std::atomic_uint32_t idle_mask_{0};
+    std::atomic_uint64_t idle_mask_{0};
     // polling P 掩码
-    std::atomic_uint32_t polling_mask_{0};
+    std::atomic_uint64_t polling_mask_{0};
     // Running P 掩码
-    std::atomic<uint32_t> running_mask_{0};
+    std::atomic<uint64_t> running_mask_{0};
     // 自旋P
     std::atomic<int> spinning_processors_count_{0};
     std::atomic<bool> need_spinning_{false};
@@ -129,7 +131,7 @@ inline Scheduler::Scheduler() : processors_(create_processors(max_procs))
     // 第一个协程不会唤醒
     spinning_processors_count_.store(1);
     // 除去自己
-    idle_mask_ = (1 << max_procs) - 2;
+    idle_mask_ = (1uLL << max_procs) - 2;
     current_processor_ = processors_[0].get();
 }
 
@@ -154,7 +156,8 @@ inline void Scheduler::co_spawn(Handle coro, bool yield)
         add_coro_to_processor(coro, current_processor_, yield);
     }
     int expected = 0;
-    if (spinning_processors_count_.load() > 0 || !spinning_processors_count_.compare_exchange_strong(expected, 1))
+    if (spinning_processors_count_.load(std::memory_order_relaxed) > 0 ||
+        !spinning_processors_count_.compare_exchange_strong(expected, 1))
     {
         return;
     }
@@ -172,6 +175,7 @@ inline void Scheduler::processor_func(Processor* p)
     {
         auto coro = get_coro();
         assert(coro);
+        p->local_count_++;
         coro->resume();
     }
 }
@@ -264,7 +268,7 @@ inline auto Scheduler::get_coro() -> Handle
 inline void Scheduler::need_spinning()
 {
     need_spinning_.store(true);
-    if (auto mask = polling_mask_.load(); mask)
+    if (auto mask = polling_mask_.load(std::memory_order::relaxed); mask)
     {
         auto low_1bit = mask & -mask;
         auto index = __builtin_ctz(low_1bit);
@@ -272,7 +276,7 @@ inline void Scheduler::need_spinning()
         return;
     }
     // 已经确保不会饿死
-    if (auto mask = idle_mask_.load(); mask)
+    if (auto mask = idle_mask_.load(std::memory_order::relaxed); mask)
     {
         auto low_1bit = mask & -mask;
         auto index = __builtin_ctz(low_1bit);
@@ -333,7 +337,15 @@ inline auto Scheduler::get_coro_from_processor(Processor* processor) -> Handle
     {
         return coro;
     }
-
+    // 多次后，考虑从全局队列获取
+    constexpr int interval = 61;
+    if (processor->local_count_ % interval == 0)
+    {
+        if (auto coros = get_global_coroutine(1); !coros.empty())
+        {
+            return coros.front();
+        }
+    }
     // 需要重试保证本地队列取完
     while (!processor->coros.empty())
     {
@@ -346,36 +358,51 @@ inline auto Scheduler::get_coro_from_processor(Processor* processor) -> Handle
     if (processor->iocontext.has_work())
     {
         auto coros = processor->iocontext.poll(false);
-        if (auto it = coros.begin(); it != coros.end())
+        if (coros.empty())
         {
-            auto coro = *it;
-            ++it;
-            add_coro_to_processor({it, coros.end()}, processor);
-            return coro;
+            return {};
         }
+        auto coro = coros.front();
+        if (coros.size() > 1)
+        {
+            add_coro_to_processor({coros.begin() + 1, coros.end()}, processor);
+            spinning_processors_count_.fetch_add(1);
+            need_spinning();
+        }
+
+        return coro;
     }
     return {};
 }
 
 inline auto Scheduler::get_coro_with_spinning(Processor* processor) -> Handle
 {
+    Handle coro;
     std::vector<Handle> coros;
+    bool more = false;
     //
     if (coros = get_global_coroutine(max_local_queue_size / 2); coros.empty())
     {
         if (coros = steal_coroutine(processor); coros.empty() && processor->iocontext.has_work())
         {
-            coros = processor->iocontext.poll(false);
+            if (coros = processor->iocontext.poll(false); coros.size() > 1)
+            {
+                more = true;
+            }
         }
     }
-    if (auto it = coros.begin(); it != coros.end())
+    if (coros.empty())
     {
-        auto coro = *it;
-        ++it;
-        add_coro_to_processor({it, coros.end()}, processor);
-        return coro;
+        return {};
     }
-    return {};
+    coro = coros.front();
+    add_coro_to_processor({coros.begin() + 1, coros.end()}, processor);
+    if (more)
+    {
+        spinning_processors_count_.fetch_add(1);
+        need_spinning();
+    }
+    return coro;
 }
 
 inline void Scheduler::add_global_coroutine(std::span<Handle> coros)
@@ -386,7 +413,7 @@ inline void Scheduler::add_global_coroutine(std::span<Handle> coros)
 }
 inline auto Scheduler::get_global_coroutine(size_t max_count) -> std::vector<Handle>
 {
-    if (global_coros_count_.load() == 0)
+    if (global_coros_count_.load(std::memory_order::relaxed) == 0)
     {
         return {};
     }
@@ -411,7 +438,8 @@ inline auto Scheduler::steal_coroutine(Processor* processor) -> std::vector<Hand
         {
             auto steal_processor = processors_[(i + rand_idx) % max_procs].get();
             // 只窃取正在运行的P
-            if (steal_processor == processor || !(running_mask_.load() & (1 << steal_processor->id)))
+            if (steal_processor == processor ||
+                !(running_mask_.load(std::memory_order::relaxed) & (1 << steal_processor->id)))
             {
                 continue;
             }
@@ -427,7 +455,8 @@ inline auto Scheduler::steal_coroutine(Processor* processor) -> std::vector<Hand
     for (int i = 0; i < max_procs; i++)
     {
         auto steal_processor = processors_[(i + rand_idx) % max_procs].get();
-        if (steal_processor == processor || !(running_mask_.load() & (1 << steal_processor->id)))
+        if (steal_processor == processor ||
+            !(running_mask_.load(std::memory_order::relaxed) & (1 << steal_processor->id)))
         {
             continue;
         }
@@ -447,7 +476,7 @@ inline bool Scheduler::can_spinning()
         return true;
     }
     // 考虑自旋数
-    else if (auto count = spinning_processors_count_.load(); 3 * count <= get_idle_count())
+    else if (auto count = spinning_processors_count_.load(std::memory_order::relaxed); 3 * count <= get_idle_count())
     {
         // 自旋
         spinning_processors_count_.fetch_add(1);
@@ -457,7 +486,7 @@ inline bool Scheduler::can_spinning()
 }
 inline size_t Scheduler::get_idle_count()
 {
-    int running_count = __builtin_popcountll(running_mask_.load());
+    int running_count = __builtin_popcountll(running_mask_.load(std::memory_order::relaxed));
     return max_procs - running_count;
 }
 inline void Scheduler::wake_from_idle(Processor* p)

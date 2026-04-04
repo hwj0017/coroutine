@@ -14,7 +14,6 @@
 
 namespace utils
 {
-using Lock = std::mutex;
 enum class State
 {
     OK,
@@ -26,6 +25,8 @@ template <typename T = void> class Channel;
 template <typename T> class Channel
 {
   public:
+    using Lock = std::mutex;
+
     class SendAwaiter
     {
       public:
@@ -225,6 +226,8 @@ template <typename T> bool Channel<T>::recv_impl(RecvAwaiter* recv_awaiter)
 template <> class Channel<void>
 {
   public:
+    using Lock = std::mutex;
+
     // 以下将特化channel<void>
     class SendAwaiter
     {

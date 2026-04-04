@@ -10,7 +10,7 @@ inline ::rpc::EchoResponse echo(::rpc::EchoRequest msg)
     res.set_data(std::move(msg.data()));
     return res;
 }
-auto utils::main_coro() -> MainCoroutine
+auto utils::main_coro() -> Coroutine<int>
 {
     RpcServer server("127.0.0.1", 8888);
     server.register_service("echo", echo);

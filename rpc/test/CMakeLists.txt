@@ -6,3 +6,7 @@ target_link_libraries(rpcserver PRIVATE rpc)
 add_executable(rpcclient)
 target_sources(rpcclient PRIVATE rpcclient.cpp service.pb.cc)
 target_link_libraries(rpcclient PRIVATE rpc)
+
+add_executable(rpcbenchmark)
+target_sources(rpcbenchmark PRIVATE rpcbenchmark.cpp service.pb.cc)
+target_link_libraries(rpcbenchmark PRIVATE rpc)

@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <ostream>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -45,7 +46,6 @@ struct RpcServer::Impl
         while (true)
         {
             auto n = co_await session->read(buffer.writable_span(BufferSize));
-            std::cout << "read " << n << " bytes" << std::endl;
             if (n <= 0)
                 break;
             buffer.commit_write(n);
@@ -56,6 +56,7 @@ struct RpcServer::Impl
 
                 if (result == RpcParseResult::Error)
                 {
+                    std::println(std::cout, "parse error");
                     session->close();
                     co_return;
                 }

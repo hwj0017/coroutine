@@ -23,7 +23,7 @@ size_t get_mem_sys_bytes()
     }
     return 0;
 }
-auto main_coro() -> MainCoroutine
+auto main_coro() -> Coroutine<int>
 {
     size_t beforeAlloc = get_mem_sys_bytes();
     WaitGroup wg;

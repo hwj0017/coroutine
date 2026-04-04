@@ -4,7 +4,7 @@
 #include <array>
 #include <cstddef>
 
-auto utils::main_coro() -> MainCoroutine
+auto utils::main_coro() -> Coroutine<int>
 {
     constexpr size_t buffer_size = 1024;
     std::array<char, buffer_size> buffer;

@@ -1,9 +1,12 @@
 #pragma once
 #include "coroutine/channel.h"
 #include "coroutine/coroutine.h"
+#include "coroutine/waitgroup.h"
 #include "rpc/message.h"
 #include "tcp/socket.h"
 #include <cstddef>
+#include <iostream>
+#include <ostream>
 #include <string>
 #include <string_view>
 namespace utils
@@ -14,11 +17,19 @@ class RpcClient
     RpcClient(std::string_view host, uint16_t port)
         : socket_(Socket::create_tcp()), server_addr_(port, host), pending_(1024)
     {
+        wg_.add(2); // 读写协程
         co_spawn(write_worker());
         co_spawn(read_worker());
     }
 
     template <IsMessage R, IsMessage Arg> auto call(std::string method, const Arg& arg, R& reply) -> Coroutine<bool>;
+
+    auto join()
+    {
+        socket_.close();
+        pending_.close();
+        return wg_.wait();
+    }
 
   private:
     struct RpcRequest
@@ -81,8 +92,9 @@ class RpcClient
     Socket socket_;
     InetAddress server_addr_;
     std::mutex mutex_;
-    bool is_closed_{false};
+    std::atomic<bool> is_closed_{false};
     std::atomic<bool> is_connected_ = false;
+    WaitGroup wg_;
     Channel<RpcRequest> pending_;
     std::unordered_map<uint64_t, ReadyAwaiter*> awaiters_;
     std::unordered_map<uint64_t, RpcResponse> responses_;

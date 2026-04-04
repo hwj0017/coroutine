@@ -6,7 +6,7 @@
 #include <iostream>
 #include <mutex>
 
-auto utils::main_coro() -> MainCoroutine
+auto utils::main_coro() -> Coroutine<int>
 {
     co_await delay(5);
     co_return 0;

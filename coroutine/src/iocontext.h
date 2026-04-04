@@ -81,9 +81,10 @@ class IOContext
             }
             else
             {
-
-                auto handle = awaiter->set_value(cqe->res);
-                coroutines.push_back(handle);
+                if (auto handle = awaiter->set_value(cqe->res); handle)
+                {
+                    coroutines.push_back(handle);
+                }
             }
             ++finished_count;
         }
@@ -130,7 +131,7 @@ class IOContext
     io_uring ring_;
     int eventfd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     uint64_t eventfd_buf_ = 0;
-    ReadAwaiter eventfd_awaiter_{};
+    ReadAwaiter eventfd_awaiter_{eventfd_, &eventfd_buf_, 8};
     BitwiseTimerWheel timer_wheel_{MS(1), std::vector<size_t>{8, 6, 6, 6, 6}};
     // eventfd_ read 的缓冲区
     std::queue<std::function<void()>> pending_call_{};
