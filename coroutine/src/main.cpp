@@ -1,6 +1,7 @@
 #include "coroutine/main.h"
 #include "schedule.h"
 #include <cassert>
+#include <csignal>
 #include <cstdlib>
 #include <iostream>
 namespace utils
@@ -26,6 +27,7 @@ auto listen() -> ListenCoroutine
 
 int main()
 {
+    std::signal(SIGPIPE, SIG_IGN);
     utils::co_spawn(utils::listen());
     utils::schedule();
     return 0;

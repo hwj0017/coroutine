@@ -84,6 +84,7 @@ template <typename T> class Channel
             state_ = state;
             return promise_;
         }
+        void cancel() {}
 
       private:
         Channel<T>* channel_;
@@ -150,6 +151,7 @@ template <typename T> class Channel
     Lock mutex_{};
     size_t capacity_{};
     std::queue<T> resource_{};
+
     std::queue<SendAwaiter*> send_awaiters_;
     std::queue<RecvAwaiter*> recv_awaiters_;
     bool is_closed_ = false;

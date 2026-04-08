@@ -35,14 +35,15 @@ class IOContext
     auto poll(bool block) -> std::vector<Handle>
     {
         assert(event_count_ > 0);
+        // 提交所有未提交的IO操作，降低延迟
+        if (unsubmitted_count_ > 0)
+        {
+            auto ret = io_uring_submit(&ring_);
+            assert(ret == unsubmitted_count_);
+            unsubmitted_count_ = 0;
+        }
         if (block)
         {
-            if (unsubmitted_count_ > 0)
-            {
-                auto ret = io_uring_submit(&ring_);
-                assert(ret == unsubmitted_count_);
-                unsubmitted_count_ = 0;
-            }
             int next_timeout_ms = timer_wheel_.get_next_timeout();
             struct __kernel_timespec ts;
             struct __kernel_timespec* ts_ptr = nullptr;
@@ -142,7 +143,7 @@ class IOContext
 
 inline IOContext::IOContext()
 {
-    auto res = io_uring_queue_init(8, &ring_, 0);
+    auto res = io_uring_queue_init(entries, &ring_, 0);
     assert(res >= 0);
     eventfd_awaiter_ = {eventfd_, &eventfd_buf_, 8};
     process(&eventfd_awaiter_);

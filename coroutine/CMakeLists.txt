@@ -6,9 +6,10 @@ file(GLOB_RECURSE COROUTINE_SOURCES
 )
 # 创建静态库
 add_library(coroutine STATIC ${COROUTINE_SOURCES})
-# 设置头文件目录
+# 包含头文件路径
+target_include_directories(coroutine PUBLIC ${URING_INCLUDE_DIR})
 target_include_directories(coroutine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(coroutine PUBLIC uring)
+target_link_libraries(coroutine PUBLIC ${URING_LIBRARY} mimalloc)
 
 # ... 项目定义 ...
 

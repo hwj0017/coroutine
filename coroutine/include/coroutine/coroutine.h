@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
+#include <mimalloc.h>
 #include <string>
 #include <utility>
 #include <variant>
@@ -27,6 +28,20 @@ class Promise
 {
   public:
     Promise() = default;
+    void* operator new(std::size_t size)
+    {
+        // 调用 minimalloc 的分配函数 (如果是你自己的库，替换为对应的 malloc)
+        // 打印日志或做追踪也可以在这里加
+        // return mi_malloc(size);
+        return ::operator new(size);
+    }
+    // 核心：重写协程帧的内存释放
+    void operator delete(void* ptr, std::size_t size)
+    {
+        // 调用 minimalloc 的释放函数
+        // mi_free(ptr);
+        ::operator delete(ptr);
+    }
     auto initial_suspend() noexcept { return std::suspend_always{}; }
     auto final_suspend() noexcept { return std::suspend_never{}; };
     void unhandled_exception() { std::exit(-1); }

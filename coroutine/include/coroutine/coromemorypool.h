@@ -89,7 +89,7 @@ struct ThreadLocalCache
 };
 
 // 使用 thread_local 关键字实现 TLS
-thread_local ThreadLocalCache tls_caches[NUM_CLASSES];
+inline thread_local ThreadLocalCache tls_caches[NUM_CLASSES];
 
 // 4. 核心分配器
 class CoroMemoryPool

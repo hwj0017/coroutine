@@ -32,9 +32,6 @@ target_link_libraries(manual_bench
     PRIVATE
     coroutine # 你的核心库目标
 )
-add_executable(check)
-target_sources(check PRIVATE check.cpp)
-target_include_directories(check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src ../include)
 
 # 6. 设置输出名称，方便识别
 set_target_properties(manual_bench PROPERTIES OUTPUT_NAME "coro_bench_tool")

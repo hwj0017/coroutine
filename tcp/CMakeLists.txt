@@ -7,7 +7,7 @@ file(GLOB_RECURSE COROUTINE_SOURCES
 # 暂时没有源文件
 add_library(tcp STATIC ${COROUTINE_SOURCES})
 # 设置头文件目录
-target_include_directories(tcp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/coroutine/include)
+target_include_directories(tcp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(tcp PUBLIC coroutine)
 
 add_subdirectory(test)
