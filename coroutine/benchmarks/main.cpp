@@ -2,12 +2,29 @@
 #include "coroutine/channel.h"
 #include "coroutine/coroutine.h"
 #include "coroutine/waitgroup.h"
+#include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <iomanip>
 #include <iostream>
 #include <vector>
 
 using namespace std::chrono;
+
+std::atomic<size_t> new_count{0};
+std::atomic<size_t> delete_count{0};
+void* operator new(std::size_t size)
+{
+    ++new_count;
+    void* p = std::malloc(size);
+    return p;
+}
+
+void operator delete(void* ptr) noexcept
+{
+    ++delete_count;
+    std::free(ptr);
+}
 
 namespace utils
 {
@@ -146,7 +163,7 @@ auto main_coro() -> utils::Coroutine<int>
     // 注意：如果是单线程调度器，测试结果仅代表无锁情况下的吞吐；
     // 如果支持多线程 Work-Stealing 调度，则会对标 Go 的 GOMAXPROCS>1 场景。
     co_await benchmark_throughput(10000000, 16, 16);
-
+    std::cout << "new count: " << new_count.load() << ", delete count: " << delete_count.load() << "\n";
     co_return 0; // 或者不返回，取决于 Coroutine<int> 的实现
 }
 } // namespace utils

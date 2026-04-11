@@ -12,7 +12,7 @@
 #include <variant>
 namespace utils
 {
-
+class Promise;
 class YieldAwaiter
 {
   public:
@@ -23,6 +23,28 @@ class YieldAwaiter
     }
     void await_resume() const noexcept {}
 };
+
+class FinalAwaiter
+{
+  public:
+    bool await_ready() const noexcept { return false; }
+    template <typename P> auto await_suspend(std::coroutine_handle<P> handle) const noexcept -> std::coroutine_handle<>
+    {
+        auto promise = handle.promise();
+        auto awaiter = promise.awaiter_;
+        if (!awaiter)
+        {
+            handle.destroy();
+            return std::noop_coroutine();
+        }
+        assert(awaiter->awaiter_promise_);
+        auto awaiter_handle = std::coroutine_handle<Promise>::from_promise(*awaiter->awaiter_promise_);
+        handle.destroy();
+        return awaiter_handle;
+    }
+    void await_resume() const noexcept {}
+};
+
 class CoroutineBase;
 class Promise
 {
@@ -43,7 +65,7 @@ class Promise
         ::operator delete(ptr);
     }
     auto initial_suspend() noexcept { return std::suspend_always{}; }
-    auto final_suspend() noexcept { return std::suspend_never{}; };
+    auto final_suspend() noexcept { return FinalAwaiter{}; };
     void unhandled_exception() { std::exit(-1); }
     auto yield_value(std::monostate value = {}) { return YieldAwaiter{}; }
     void resume() { std::coroutine_handle<Promise>::from_promise(*this).resume(); }
@@ -61,6 +83,7 @@ class Promise
     // 用于实现侵入式链表
     Promise* next_{};
     friend class CoroQueue;
+    friend class FinalAwaiter;
 };
 class CoroutineBase
 {
@@ -89,6 +112,7 @@ class CoroutineBase
 
   protected:
     friend void co_spawn(CoroutineBase&& coro);
+    friend class FinalAwaiter;
     Promise* self_promise_{};
     // await_suspend的handle
     Promise* awaiter_promise_{};
@@ -131,10 +155,7 @@ template <typename T> void Coroutine<T>::promise_type::return_value(T value)
 {
     if (awaiter_)
     {
-        if (auto promise = static_cast<Coroutine<T>*>(awaiter_)->set_value(std::move(value)); promise)
-        {
-            co_spawn(promise);
-        }
+        static_cast<Coroutine<T>*>(awaiter_)->set_value(std::move(value));
     }
 }
 
@@ -154,16 +175,7 @@ template <> class Coroutine<void> : public CoroutineBase
 };
 
 inline auto Coroutine<>::promise_type::get_return_object() -> Coroutine<void> { return Coroutine<void>(this); }
-inline void Coroutine<>::promise_type::return_void()
-{
-    if (awaiter_)
-    {
-        if (auto promise = static_cast<Coroutine<>*>(awaiter_)->set_value(); promise)
-        {
-            co_spawn(promise);
-        }
-    }
-}
+inline void Coroutine<>::promise_type::return_void() {}
 
 // 侵入式链表
 class CoroQueue
