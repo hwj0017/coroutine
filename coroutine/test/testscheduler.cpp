@@ -15,7 +15,7 @@ auto funcA(int i, utils::Channel<>& c) -> utils::Coroutine<>
 
     co_return;
 }
-auto utils::main_coro() -> Coroutine<int>
+auto utils::main_coro() -> MainCoroutine
 {
     std::cout << "main\n";
     Channel<> c(1000);

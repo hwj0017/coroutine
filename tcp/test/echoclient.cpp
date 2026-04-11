@@ -1,10 +1,11 @@
+#include "coroutine/coroutine.h"
 #include "coroutine/main.h"
 #include "tcp/inetaddress.h"
 #include "tcp/socket.h"
 #include <array>
 #include <cstddef>
 
-auto utils::main_coro() -> Coroutine<int>
+auto utils::main_coro() -> MainCoroutine
 {
     constexpr size_t buffer_size = 1024;
     std::array<char, buffer_size> buffer;

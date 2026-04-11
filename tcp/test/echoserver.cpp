@@ -23,7 +23,7 @@ auto echo(utils::Socket conn) -> utils::Coroutine<>
         }
     }
 }
-auto utils::main_coro() -> Coroutine<int>
+auto utils::main_coro() -> MainCoroutine
 {
     InetAddress addr(8888, "127.0.0.1");
     utils::TcpServer server(addr);

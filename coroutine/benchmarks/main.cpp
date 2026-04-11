@@ -149,7 +149,7 @@ auto benchmark_throughput(int total_msgs, int p_count, int c_count) -> Coroutine
     std::cout << "    Throughput: " << std::fixed << std::setprecision(0) << msgs_per_sec << " msgs/sec\n\n";
 }
 
-auto main_coro() -> utils::Coroutine<int>
+auto main_coro() -> utils::MainCoroutine
 {
     std::cout << "=== C++ Stackless Coroutine Benchmark Suite ===\n\n";
 

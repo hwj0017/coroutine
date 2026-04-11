@@ -112,7 +112,7 @@ void print_report(size_t size_bytes, int conc, double duration_s, BenchResult& r
 }
 
 // --- 主入口：测试矩阵 ---
-auto main_coro() -> Coroutine<int>
+auto main_coro() -> MainCoroutine
 {
     // 测试维度配置
     std::vector<size_t> payload_sizes = {64, 1024, 16384, 131072}; // 64B, 1K, 16K, 128K

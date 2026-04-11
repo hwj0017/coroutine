@@ -1,3 +1,4 @@
+#include "coroutine/coroutine.h"
 #include "coroutine/main.h"
 #include "coroutine/syscall.h"
 #include <chrono>
@@ -10,7 +11,7 @@
 #include <string.h>
 #include <thread>
 #include <unistd.h>
-auto utils::main_coro() -> Coroutine<int>
+auto utils::main_coro() -> MainCoroutine
 {
     // struct io_uring ring;
     // int ret = io_uring_queue_init(8, &ring, 0);

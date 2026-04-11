@@ -3,6 +3,6 @@
 namespace utils
 {
 // 代替主函数
-auto main_coro() -> Coroutine<int>;
+auto main_coro() -> MainCoroutine;
 
 } // namespace utils

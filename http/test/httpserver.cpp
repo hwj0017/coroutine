@@ -2,7 +2,7 @@
 #include "coroutine/coroutine.h"
 #include "coroutine/main.h"
 #include "http/httpcontext.h"
-auto utils::main_coro() -> Coroutine<int>
+auto utils::main_coro() -> MainCoroutine
 {
     HttpServer server("127.0.0.1", 8888);
     server.GET("/", [](HttpContext* ctx) -> Coroutine<> {

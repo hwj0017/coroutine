@@ -65,7 +65,7 @@ class Promise
         ::operator delete(ptr);
     }
     auto initial_suspend() noexcept { return std::suspend_always{}; }
-    auto final_suspend() noexcept { return FinalAwaiter{}; };
+
     void unhandled_exception() { std::exit(-1); }
     auto yield_value(std::monostate value = {}) { return YieldAwaiter{}; }
     void resume() { std::coroutine_handle<Promise>::from_promise(*this).resume(); }
@@ -132,6 +132,7 @@ template <typename T = void> class Coroutine : public CoroutineBase
     class promise_type : public Promise
     {
       public:
+        auto final_suspend() noexcept { return FinalAwaiter{}; };
         auto get_return_object() -> Coroutine<T>;
         void return_value(T value);
     };
@@ -165,18 +166,48 @@ template <> class Coroutine<void> : public CoroutineBase
     class promise_type : public Promise
     {
       public:
+        auto final_suspend() noexcept { return FinalAwaiter{}; };
         auto get_return_object() -> Coroutine<void>;
-        void return_void();
+        void return_void() {}
     };
     Coroutine() = default;
     Coroutine(promise_type* promise) : CoroutineBase(promise) {}
     void await_resume() {}
-    auto set_value() { return awaiter_promise_; }
 };
 
 inline auto Coroutine<>::promise_type::get_return_object() -> Coroutine<void> { return Coroutine<void>(this); }
-inline void Coroutine<>::promise_type::return_void() {}
 
+class MainFinalAwaiter
+{
+  public:
+    MainFinalAwaiter(int value) : value_(value) {}
+    bool await_ready() const noexcept { return false; }
+    template <typename P> auto await_suspend(std::coroutine_handle<P> handle) const noexcept
+    {
+        handle.destroy();
+        std::exit(value_); // 直接退出程序，或者根据需要执行其他清理逻辑
+    }
+    void await_resume() const noexcept {}
+
+  private:
+    int value_;
+};
+class MainCoroutine : public CoroutineBase
+{
+  public:
+    class promise_type : public Promise
+    {
+      public:
+        auto final_suspend() noexcept { return MainFinalAwaiter{value_}; };
+        auto get_return_object() -> MainCoroutine;
+        int return_value(int value) { return value_; }
+        int value_;
+    };
+    MainCoroutine() = default;
+    MainCoroutine(promise_type* promise) : CoroutineBase(promise) {}
+    void await_resume() {}
+};
+inline auto MainCoroutine::promise_type::get_return_object() -> MainCoroutine { return MainCoroutine(this); }
 // 侵入式链表
 class CoroQueue
 {
@@ -216,5 +247,6 @@ class CoroQueue
         return promise;
     }
     bool empty() const { return size_ == 0; }
+    size_t size() const { return size_; }
 };
 } // namespace utils

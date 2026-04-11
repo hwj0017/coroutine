@@ -45,7 +45,7 @@ auto benchmark_ping_pong(int n) -> Coroutine<>
     std::cout << "Ping-Pong: " << total_ns / (n * 2) << " ns/op (per switch)" << std::endl;
 }
 
-auto main_coro() -> utils::Coroutine<int>
+auto main_coro() -> MainCoroutine
 {
     void* ptr = malloc(100);
     std::cout << "--- Starting Benchmarks (C++ Coroutines) ---" << std::endl;
