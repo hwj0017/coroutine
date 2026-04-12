@@ -68,11 +68,11 @@ auto benchmark_yield(int num_routines, int num_yields) -> Coroutine<>
 // =====================================================================
 auto benchmark_ping_pong(int n) -> Coroutine<>
 {
-    auto chan_a = Channel<>(0); // 无缓冲 channel
-    auto chan_b = Channel<>(0);
+    auto chan_a = Channel<void, 0>(0); // 无缓冲 channel
+    auto chan_b = Channel<void, 0>(0);
 
     // 启动对端协程
-    co_spawn([](int n, Channel<>& a, Channel<>& b) -> Coroutine<> {
+    co_spawn([](int n, Channel<void, 0>& a, Channel<void, 0>& b) -> Coroutine<> {
         for (int i = 0; i < n; ++i)
         {
             co_await a.recv();
@@ -102,7 +102,7 @@ auto benchmark_ping_pong(int n) -> Coroutine<>
 // =====================================================================
 auto benchmark_throughput(int total_msgs, int p_count, int c_count) -> Coroutine<>
 {
-    auto ch = Channel<>(1024); // 有缓冲 channel
+    auto ch = Channel<void, 1024>(0); // 有缓冲 channel
 
     auto start = high_resolution_clock::now();
     auto c_num = total_msgs / c_count;
@@ -113,7 +113,7 @@ auto benchmark_throughput(int total_msgs, int p_count, int c_count) -> Coroutine
     for (int i = 0; i < c_count; ++i)
     {
         wg.add(1);
-        co_spawn([](Channel<>& ch, int num, WaitGroup& wg) -> Coroutine<> {
+        co_spawn([](Channel<void, 1024>& ch, int num, WaitGroup& wg) -> Coroutine<> {
             for (int j = 0; j < num; ++j)
             {
                 auto v = co_await ch.recv();
@@ -127,7 +127,7 @@ auto benchmark_throughput(int total_msgs, int p_count, int c_count) -> Coroutine
     for (int i = 0; i < p_count; ++i)
     {
         wg.add(1);
-        co_spawn([](Channel<>& ch, int p_num, WaitGroup& wg) -> Coroutine<> {
+        co_spawn([](Channel<void, 1024>& ch, int p_num, WaitGroup& wg) -> Coroutine<> {
             for (int j = 0; j < p_num; ++j)
             {
                 co_await ch.send(); // 同理，如果 send 需参，传入伪数据

@@ -12,7 +12,7 @@ namespace utils
 int shared_resource = 0;
 Mutex mtx;
 ConditionVariable cv(mtx);
-Channel<> ch;
+Channel<void, 0> ch;
 // 生产者：增加资源并通知
 Coroutine<> producer(int id)
 {

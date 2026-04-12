@@ -1,6 +1,7 @@
 #pragma once
 #include "coroutine/coroutine.h"
 #include "coroutine/cospawn.h"
+#include "coroutine/intrusivelist.h"
 #include <atomic>
 #include <coroutine>
 #include <mutex>
@@ -32,12 +33,11 @@ class WaitGroup
     std::atomic<Waiter*> waiters_{nullptr}; // 等待者链表头
     void resume_all();
 };
-class WaitGroup::Waiter
+class WaitGroup::Waiter : public IntrusiveListNode
 {
   private:
     WaitGroup& wg_;
     Promise* promise_{nullptr};
-    Waiter* next_{nullptr};
     friend class WaitGroup;
 
   public:
@@ -84,7 +84,7 @@ inline void WaitGroup::resume_all()
         Waiter* curr = waiters_.exchange(nullptr, std::memory_order_acquire);
         while (curr)
         {
-            auto next = curr->next_;
+            auto next = static_cast<Waiter*>(curr->next_);
             if (auto promise = curr->set_value(); promise)
             {
                 co_spawn(promise);

@@ -14,8 +14,7 @@ namespace utils
 class RpcClient
 {
   public:
-    RpcClient(std::string_view host, uint16_t port)
-        : socket_(Socket::create_tcp()), server_addr_(port, host), pending_(1024)
+    RpcClient(std::string_view host, uint16_t port) : socket_(Socket::create_tcp()), server_addr_(port, host)
     {
         wg_.add(2); // 读写协程
         co_spawn(write_worker());
@@ -89,13 +88,14 @@ class RpcClient
     }
     auto write_worker() -> Coroutine<>;
     auto read_worker() -> Coroutine<>;
+    constexpr static size_t Capacity = 1024;
     Socket socket_;
     InetAddress server_addr_;
     std::mutex mutex_;
     std::atomic<bool> is_closed_{false};
     std::atomic<bool> is_connected_ = false;
     WaitGroup wg_;
-    Channel<RpcRequest> pending_;
+    Channel<RpcRequest, Capacity> pending_;
     std::unordered_map<uint64_t, ReadyAwaiter*> awaiters_;
     std::unordered_map<uint64_t, RpcResponse> responses_;
     std::atomic<size_t> sequence_id_ = 0;

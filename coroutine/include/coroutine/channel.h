@@ -2,10 +2,13 @@
 
 #include "coroutine/coroutine.h"
 #include "coroutine/cospawn.h"
+#include "coroutine/intrusivelist.h"
+#include "coroutine/ringbuffer.h"
 #include "coroutine/spinlock.h"
 #include <cassert>
 #include <coroutine>
 #include <cstddef>
+#include <functional>
 #include <mutex>
 #include <queue>
 #include <tuple>
@@ -20,17 +23,17 @@ enum class State
     CLOSED
 };
 
-template <typename T = void> class Channel;
+template <typename T, size_t Capacity> class Channel;
 
-template <typename T> class Channel
+template <typename T, size_t Capacity> class Channel
 {
   public:
     using Lock = std::mutex;
 
-    class SendAwaiter
+    class SendAwaiter : public IntrusiveListDNode
     {
       public:
-        SendAwaiter(Channel<T>* channel, T&& value) : channel_(channel), value_(std::move(value)) {}
+        SendAwaiter(Channel<T, Capacity>* channel, T&& value) : channel_(channel), value_(std::move(value)) {}
         bool await_ready() const noexcept { return false; }
         template <typename Promise> bool await_suspend(std::coroutine_handle<Promise> handle) noexcept
         {
@@ -48,18 +51,18 @@ template <typename T> class Channel
         }
 
       private:
-        Channel<T>* channel_;
+        Channel<T, Capacity>* channel_;
         T value_{};
         State state_{State::CLOSED};
         Promise* promise_{};
     };
 
     // 接收操作
-    class RecvAwaiter
+    class RecvAwaiter : public IntrusiveListDNode
     {
 
       public:
-        RecvAwaiter(Channel<T>* channel) : channel_(channel) {}
+        RecvAwaiter(Channel<T, Capacity>* channel) : channel_(channel) {}
         auto await_ready() const noexcept { return false; }
 
         template <typename Promise> bool await_suspend(std::coroutine_handle<Promise> handle) noexcept
@@ -87,26 +90,12 @@ template <typename T> class Channel
         void cancel() {}
 
       private:
-        Channel<T>* channel_;
+        Channel<T, Capacity>* channel_;
         T value_{};
         State state_ = State::CLOSED;
         Promise* promise_;
     };
-    Channel(size_t capacity = 0)
-        requires(!std::is_same_v<T, std::monostate>)
-        : capacity_(capacity)
-    {
-    }
-    Channel(size_t capacity = 0, size_t initial_size = 0)
-        requires(std::is_same_v<T, std::monostate>)
-        : capacity_(capacity)
-    {
-        assert(initial_size <= capacity);
-        for (size_t i = 0; i < initial_size; ++i)
-        {
-            resource_.push(std::monostate{});
-        }
-    }
+    Channel() = default;
     ~Channel() { close(); }
 
     auto recv() { return RecvAwaiter{this}; }
@@ -129,14 +118,14 @@ template <typename T> class Channel
         }
         while (!send_awaiters_.empty())
         {
-            auto p = send_awaiters_.front()->set_value(State::CLOSED);
-            send_awaiters_.pop();
+            auto awaiter = send_awaiters_.pop_front();
+            auto p = static_cast<SendAwaiter*>(awaiter)->set_value(State::CLOSED);
             co_spawn(p);
         }
         while (!recv_awaiters_.empty())
         {
-            auto p = recv_awaiters_.front()->set_value({}, State::CLOSED);
-            recv_awaiters_.pop();
+            auto awaiter = recv_awaiters_.pop_front();
+            auto p = static_cast<RecvAwaiter*>(awaiter)->set_value({}, State::CLOSED);
             co_spawn(p);
         }
     }
@@ -146,18 +135,17 @@ template <typename T> class Channel
     bool recv_impl(RecvAwaiter* awaiter);
     bool is_closed() const { return is_closed_; }
     bool is_empty() const { return resource_.empty() && send_awaiters_.empty(); }
-    bool is_full() const { return resource_.size() >= capacity_ && recv_awaiters_.empty(); }
+    bool is_full() const { return resource_.full() && recv_awaiters_.empty(); }
 
     Lock mutex_{};
-    size_t capacity_{};
-    std::queue<T> resource_{};
+    RingBuffer<T, Capacity> resource_{};
 
-    std::queue<SendAwaiter*> send_awaiters_;
-    std::queue<RecvAwaiter*> recv_awaiters_;
+    IntrusiveDList send_awaiters_;
+    IntrusiveDList recv_awaiters_;
     bool is_closed_ = false;
 };
 
-template <typename T> bool Channel<T>::send_impl(SendAwaiter* send_awaiter)
+template <typename T, size_t Capacity> bool Channel<T, Capacity>::send_impl(SendAwaiter* send_awaiter)
 {
     Promise* notify = nullptr;
     {
@@ -170,17 +158,20 @@ template <typename T> bool Channel<T>::send_impl(SendAwaiter* send_awaiter)
         if (is_full())
         {
             // channel未关闭且已满，阻塞
-            send_awaiters_.push(send_awaiter);
+            send_awaiters_.push_back(send_awaiter);
             return true;
         }
         // channel未关闭且不满，唤醒
-        resource_.push(send_awaiter->get_value());
+        // 优先给等待的接收者，防止缓冲区溢出
         if (!recv_awaiters_.empty())
         {
-            auto recv_awaiter = recv_awaiters_.front();
-            recv_awaiters_.pop();
-            notify = recv_awaiter->set_value(std::move(resource_.front()), State::OK);
-            resource_.pop();
+            auto recv_awaiter = recv_awaiters_.pop_front();
+            notify =
+                static_cast<RecvAwaiter*>(recv_awaiter)->set_value(std::move(send_awaiter->get_value()), State::OK);
+        }
+        else
+        {
+            resource_.push(send_awaiter->get_value());
         }
     }
     send_awaiter->set_value(State::OK);
@@ -190,7 +181,7 @@ template <typename T> bool Channel<T>::send_impl(SendAwaiter* send_awaiter)
     }
     return false;
 }
-template <typename T> bool Channel<T>::recv_impl(RecvAwaiter* recv_awaiter)
+template <typename T, size_t Capacity> bool Channel<T, Capacity>::recv_impl(RecvAwaiter* recv_awaiter)
 {
     Promise* notify = nullptr;
     {
@@ -203,20 +194,28 @@ template <typename T> bool Channel<T>::recv_impl(RecvAwaiter* recv_awaiter)
         // channel未关闭且为空，阻塞
         if (is_empty())
         {
-            recv_awaiters_.push(recv_awaiter);
+            recv_awaiters_.push_back(recv_awaiter);
             return true;
         }
         // channel不空，唤醒
         // 保持FIFO
-        if (!send_awaiters_.empty())
+        if (!resource_.empty())
         {
-            auto send_awaiter = send_awaiters_.front();
-            send_awaiters_.pop();
-            resource_.push(send_awaiter->get_value());
+            recv_awaiter->set_value(std::move(resource_.front()), State::OK);
+            resource_.pop();
+            if (!send_awaiters_.empty())
+            {
+                auto send_awaiter = static_cast<SendAwaiter*>(send_awaiters_.pop_front());
+                resource_.push(send_awaiter->get_value());
+                notify = send_awaiter->set_value(State::OK);
+            }
+        }
+        else
+        {
+            auto send_awaiter = static_cast<SendAwaiter*>(send_awaiters_.pop_front());
+            recv_awaiter->set_value(send_awaiter->get_value(), State::OK);
             notify = send_awaiter->set_value(State::OK);
         }
-        recv_awaiter->set_value(std::move(resource_.front()), State::OK);
-        resource_.pop();
     }
     if (notify)
     {
@@ -225,16 +224,16 @@ template <typename T> bool Channel<T>::recv_impl(RecvAwaiter* recv_awaiter)
     return false;
 }
 
-template <> class Channel<void>
+template <size_t Capacity> class Channel<void, Capacity>
 {
   public:
     using Lock = std::mutex;
 
     // 以下将特化channel<void>
-    class SendAwaiter
+    class SendAwaiter : public IntrusiveListDNode
     {
       public:
-        SendAwaiter(Channel<void>* channel) : channel_(channel) {}
+        SendAwaiter(Channel<void, Capacity>* channel) : channel_(channel) {}
         bool await_ready() noexcept { return false; }
         template <typename Promise> bool await_suspend(std::coroutine_handle<Promise> handle) noexcept
         {
@@ -250,17 +249,17 @@ template <> class Channel<void>
         }
 
       private:
-        Channel<void>* channel_;
+        Channel<void, Capacity>* channel_;
         State state_{State::CLOSED};
         Promise* promise_{};
     };
 
     // 接收操作
-    class RecvAwaiter
+    class RecvAwaiter : public IntrusiveListDNode
     {
 
       public:
-        RecvAwaiter(Channel<void>* channel) : channel_(channel) {}
+        RecvAwaiter(Channel<void, Capacity>* channel) : channel_(channel) {}
         auto await_ready() noexcept { return false; }
 
         template <typename Promise> bool await_suspend(std::coroutine_handle<Promise> handle) noexcept
@@ -277,14 +276,11 @@ template <> class Channel<void>
         }
 
       private:
-        Channel<void>* channel_;
+        Channel<void, Capacity>* channel_;
         State state_ = State::CLOSED;
         Promise* promise_;
     };
-    Channel(size_t capacity = 0, size_t initial_size = 0) : capacity_(capacity), size_(initial_size)
-    {
-        assert(initial_size <= capacity);
-    }
+    Channel(size_t initial_size = 0) : size_(initial_size) { assert(initial_size <= Capacity); }
     ~Channel() { close(); }
     void close()
     {
@@ -298,14 +294,14 @@ template <> class Channel<void>
         }
         while (!send_awaiters_.empty())
         {
-            auto p = send_awaiters_.front()->set_value(State::CLOSED);
-            send_awaiters_.pop();
+            auto awaiter = static_cast<SendAwaiter*>(send_awaiters_.pop_front());
+            auto p = awaiter->set_value(State::CLOSED);
             co_spawn(p);
         }
         while (!recv_awaiters_.empty())
         {
-            auto p = recv_awaiters_.front()->set_value(State::CLOSED);
-            recv_awaiters_.pop();
+            auto awaiter = static_cast<RecvAwaiter*>(recv_awaiters_.pop_front());
+            auto p = awaiter->set_value(State::CLOSED);
             co_spawn(p);
         }
     }
@@ -320,16 +316,15 @@ template <> class Channel<void>
     bool recv_impl(RecvAwaiter* awaiter);
     bool is_closed() const { return is_closed_; }
     bool is_empty() const { return size_ == 0 && send_awaiters_.empty(); }
-    bool is_full() const { return size_ >= capacity_ && recv_awaiters_.empty(); }
+    bool is_full() const { return size_ >= Capacity && recv_awaiters_.empty(); }
 
     Lock mutex_{};
-    size_t capacity_{};
     size_t size_{};
-    std::queue<SendAwaiter*> send_awaiters_;
-    std::queue<RecvAwaiter*> recv_awaiters_;
+    IntrusiveDList send_awaiters_;
+    IntrusiveDList recv_awaiters_;
     bool is_closed_ = false;
 };
-inline bool Channel<void>::send_impl(SendAwaiter* send_awaiter)
+template <size_t Capacity> bool Channel<void, Capacity>::send_impl(SendAwaiter* send_awaiter)
 {
     Promise* notify = nullptr;
     {
@@ -342,17 +337,18 @@ inline bool Channel<void>::send_impl(SendAwaiter* send_awaiter)
         if (is_full())
         {
             // channel未关闭且已满，阻塞
-            send_awaiters_.push(send_awaiter);
+            send_awaiters_.push_back(send_awaiter);
             return true;
         }
         // channel未关闭且不满，唤醒
-        size_++;
         if (!recv_awaiters_.empty())
         {
-            auto recv_awaiter = recv_awaiters_.front();
-            recv_awaiters_.pop();
+            auto recv_awaiter = static_cast<RecvAwaiter*>(recv_awaiters_.pop_front());
             notify = recv_awaiter->set_value(State::OK);
-            size_--;
+        }
+        else
+        {
+            size_++;
         }
         send_awaiter->set_value(State::OK);
     }
@@ -362,7 +358,7 @@ inline bool Channel<void>::send_impl(SendAwaiter* send_awaiter)
     }
     return false;
 }
-inline bool Channel<void>::recv_impl(RecvAwaiter* recv_awaiter)
+template <size_t Capacity> bool Channel<void, Capacity>::recv_impl(RecvAwaiter* recv_awaiter)
 {
     Promise* notify = nullptr;
     {
@@ -375,20 +371,21 @@ inline bool Channel<void>::recv_impl(RecvAwaiter* recv_awaiter)
         // channel未关闭且为空，阻塞
         if (is_empty())
         {
-            recv_awaiters_.push(recv_awaiter);
+            recv_awaiters_.push_back(recv_awaiter);
             return true;
         }
         // channel不空，唤醒
         // 保持FIFO
         if (!send_awaiters_.empty())
         {
-            auto send_awaiter = send_awaiters_.front();
-            send_awaiters_.pop();
-            size_++;
+            auto send_awaiter = static_cast<SendAwaiter*>(send_awaiters_.pop_front());
             notify = send_awaiter->set_value(State::OK);
         }
+        else
+        {
+            size_--;
+        }
         recv_awaiter->set_value(State::OK);
-        size_--;
     }
     if (notify)
     {

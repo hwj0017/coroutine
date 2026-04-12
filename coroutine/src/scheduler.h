@@ -1,9 +1,11 @@
 #pragma once
 #include "concurrentdeque.h"
 #include "coroutine/coroutine.h"
+#include "coroutine/intrusivelist.h"
 #include "coroutine/spinlock.h"
 #include "iocontext.h"
 #include "randomer.h"
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <coroutine>
@@ -25,6 +27,54 @@
 namespace utils
 {
 using Handle = Promise*;
+class WorkStealingDeque
+{
+  public:
+    constexpr static size_t Capacity = 256;
+    constexpr static size_t Mask = Capacity - 1;
+
+  private:
+    alignas(64) std::atomic<size_t> bottom_{0};
+    alignas(64) std::atomic<size_t> top_{0};
+    alignas(64) std::array<std::atomic<Handle>, Capacity> buffer_;
+
+  public:
+    WorkStealingDeque() = default;
+
+    ~WorkStealingDeque() = default;
+
+    // 单线程
+    auto push_back(IntrusiveList items) -> IntrusiveList;
+
+    // 多线程
+    auto pop_front() -> Handle;
+    // 获取一半任务
+    auto pop_front_half() -> IntrusiveList;
+    // 窃取一半任务，返回一个任务
+    auto steal(WorkStealingDeque& other) -> Handle;
+
+    // === Utility ===
+    bool empty() const
+    {
+        size_t b = bottom_.load(std::memory_order_relaxed);
+        size_t t = top_.load(std::memory_order_relaxed);
+        return b == t;
+    }
+
+    bool full() const
+    {
+        size_t b = bottom_.load(std::memory_order_relaxed);
+        size_t t = top_.load(std::memory_order_relaxed);
+        return (b - t) >= Capacity;
+    }
+
+    size_t size() const
+    {
+        size_t b = bottom_.load(std::memory_order_relaxed);
+        size_t t = top_.load(std::memory_order_relaxed);
+        return (b > t) ? (b - t) : 0;
+    }
+};
 // Processor (P)
 class Processor
 {
@@ -35,14 +85,14 @@ class Processor
         SPINNING,
         POLLING,
     };
-    explicit Processor(size_t id, size_t capacity) : id(id), coros(capacity) {}
+    explicit Processor(size_t id) : id(id) {}
 
     ~Processor() {}
     size_t id{};
     std::thread thread{};
     std::atomic<Handle> run_next{};
     IOContext iocontext{};
-    WorkStealingDeque<Handle> coros;
+    WorkStealingDeque coros;
     int local_count_{0};
     // 是否自旋
     State state{State::SPINNING};
@@ -68,16 +118,16 @@ class Scheduler
     // M执行循环
     void processor_func(Processor* p);
     void resume_processor(Processor* p = nullptr);
-    void need_spinning();
+    void make_spinning();
     auto get_coro() -> Handle;
     // 将就绪协程加入p
-    auto get_global_coroutine(size_t max_count) -> std::vector<Handle>;
-    void add_global_coroutine(std::span<Handle> coros);
-    void add_coro_to_processor(std::span<Handle> coros, Processor* processor);
+    auto get_global_coroutine(size_t max_count) -> IntrusiveList;
+    void add_global_coroutine(IntrusiveList coros);
+    void add_coro_to_processor(IntrusiveList coros, Processor* processor);
     void add_coro_to_processor(Handle coro, Processor* processor, bool yield);
     auto get_coro_from_processor(Processor* processor) -> Handle;
     auto get_coro_with_spinning(Processor* processor) -> Handle;
-    auto steal_coroutine(Processor* p) -> std::vector<Handle>;
+    auto steal_coroutine(Processor* p) -> Handle;
 
     void wake_from_idle(Processor* p);
     void wake_from_polling(Processor* p);
@@ -86,11 +136,10 @@ class Scheduler
     // 全部P
     const std::vector<std::unique_ptr<Processor>> processors_;
     // 全局队列
-    std::deque<Handle> global_coros_{};
+    IntrusiveList global_coros_{};
     Lock global_coros_mtx_{};
 
     // 全局锁
-    std::atomic<size_t> global_coros_count_{0};
     // 一些原子变量加快访问速度
     // idle P 掩码
     std::atomic_uint64_t idle_mask_{0};
@@ -100,7 +149,7 @@ class Scheduler
     std::atomic<uint64_t> running_mask_{0};
     // 自旋P
     std::atomic<int> spinning_processors_count_{0};
-    std::atomic<bool> need_spinning_{false};
+    std::atomic<bool> make_spinning_{false};
 
     static auto create_processors(size_t n) -> std::vector<std::unique_ptr<Processor>>
     {
@@ -108,7 +157,7 @@ class Scheduler
         procs.reserve(n);
         for (size_t i = 0; i < n; ++i)
         {
-            procs.push_back(std::make_unique<Processor>(i, max_local_queue_size));
+            procs.push_back(std::make_unique<Processor>(i));
         }
 
         return procs;
@@ -116,8 +165,6 @@ class Scheduler
     static thread_local Processor* current_processor_;
     static thread_local Randomer randomer_;
 
-    // p本地队列最大任务
-    static constexpr size_t max_local_queue_size = 256;
     // 最大自旋回合
     static constexpr size_t max_spinning_epoch = 10;
 };
@@ -145,10 +192,11 @@ inline void Scheduler::schedule()
 }
 inline void Scheduler::co_spawn(Handle coro, bool yield)
 {
+    assert(coro);
     // 获取当前P
     if (!current_processor_)
     {
-        add_global_coroutine({&coro, 1});
+        add_global_coroutine({coro});
     }
     else
     {
@@ -161,7 +209,7 @@ inline void Scheduler::co_spawn(Handle coro, bool yield)
     {
         return;
     }
-    need_spinning();
+    make_spinning();
 }
 inline auto Scheduler::get_io_context() -> IOContext&
 {
@@ -182,7 +230,6 @@ inline void Scheduler::processor_func(Processor* p)
 
 inline auto Scheduler::get_coro() -> Handle
 {
-    // 执行完协程需要判断是否为空
     Processor* processor = current_processor_;
     assert(processor);
     while (true)
@@ -235,7 +282,7 @@ inline auto Scheduler::get_coro() -> Handle
         }
         case Processor::State::POLLING: {
             // // 防止所有P同时POLLING导致饿死
-            if (need_spinning_.exchange(false))
+            if (make_spinning_.exchange(false))
             {
                 polling_mask_.fetch_and(~(1 << processor->id));
                 processor->state = Processor::State::SPINNING;
@@ -243,31 +290,33 @@ inline auto Scheduler::get_coro() -> Handle
             }
             // 阻塞监听io
             auto coros = processor->iocontext.poll(true);
-            // 找到任务
-            if (auto it = coros.begin(); it != coros.end())
-            {
-                auto coro = *it;
-                ++it;
-                add_coro_to_processor({it, coros.end()}, processor);
-                processor->state = Processor::State::RUNNING;
-                polling_mask_.fetch_and(~(1 << processor->id));
-                running_mask_.fetch_or(1 << processor->id);
-                return coro;
-            }
             // 没有任务
-            if (can_spinning())
+            if (coros.empty())
             {
-                polling_mask_.fetch_and(~(1 << processor->id));
-                processor->state = Processor::State::SPINNING;
+                // 考虑自旋
+                if (can_spinning())
+                {
+                    polling_mask_.fetch_and(~(1 << processor->id));
+                    processor->state = Processor::State::SPINNING;
+                }
+                break;
             }
-            break;
+            // TODO:增加自旋
+            //  获取到任务，优先执行
+            auto coro = coros.pop_front();
+            add_coro_to_processor(std::move(coros), processor);
+            // 转化成运行态
+            processor->state = Processor::State::RUNNING;
+            polling_mask_.fetch_and(~(1 << processor->id));
+            running_mask_.fetch_or(1 << processor->id);
+            return static_cast<Handle>(coro);
         }
         }
     }
 }
-inline void Scheduler::need_spinning()
+inline void Scheduler::make_spinning()
 {
-    need_spinning_.store(true);
+    make_spinning_.store(true);
     if (auto mask = polling_mask_.load(std::memory_order::relaxed); mask)
     {
         auto low_1bit = mask & -mask;
@@ -283,7 +332,7 @@ inline void Scheduler::need_spinning()
         auto new_mask = mask & ~low_1bit;
         if (idle_mask_.compare_exchange_strong(mask, new_mask))
         {
-            if (!need_spinning_.exchange(false))
+            if (!make_spinning_.exchange(false))
             {
                 idle_mask_.fetch_or(low_1bit);
                 return;
@@ -309,24 +358,25 @@ inline void Scheduler::add_coro_to_processor(Handle coro, Processor* processor, 
         coro = old_run_next;
     }
 
-    if (auto count = processor->coros.push_back({&coro, 1}); count == 1)
+    if (auto left = processor->coros.push_back({coro}); left.empty())
     {
         return;
     }
     auto half = processor->coros.pop_front_half();
     half.push_back(coro);
-    add_global_coroutine(half);
+    add_global_coroutine(std::move(half));
     return;
 }
-inline void Scheduler::add_coro_to_processor(std::span<Handle> coros, Processor* processor)
+inline void Scheduler::add_coro_to_processor(IntrusiveList coros, Processor* processor)
 {
     if (coros.empty())
     {
         return;
     }
-    if (auto res = processor->coros.push_back(coros); res != coros.size())
+    // TODO:增加自旋
+    if (auto left = processor->coros.push_back(std::move(coros)); !left.empty())
     {
-        add_global_coroutine(coros.subspan(res));
+        add_global_coroutine(std::move(left));
     }
 }
 
@@ -362,72 +412,66 @@ inline auto Scheduler::get_coro_from_processor(Processor* processor) -> Handle
         {
             return {};
         }
-        auto coro = coros.front();
-        if (coros.size() > 1)
+        auto coro = coros.pop_front();
+        if (!coros.empty())
         {
-            add_coro_to_processor({coros.begin() + 1, coros.end()}, processor);
+            add_coro_to_processor(std::move(coros), processor);
             spinning_processors_count_.fetch_add(1);
-            need_spinning();
+            make_spinning();
         }
 
-        return coro;
+        return static_cast<Handle>(coro);
     }
     return {};
 }
 
 inline auto Scheduler::get_coro_with_spinning(Processor* processor) -> Handle
 {
-    Handle coro;
-    std::vector<Handle> coros;
     bool more = false;
     //
-    if (coros = get_global_coroutine(max_local_queue_size / 2); coros.empty())
+    if (auto coros = get_global_coroutine(WorkStealingDeque::Capacity / 2); !coros.empty())
     {
-        if (coros = steal_coroutine(processor); coros.empty() && processor->iocontext.has_work())
+        auto coro = static_cast<Handle>(coros.pop_front());
+        add_coro_to_processor(std::move(coros), processor);
+        return coro;
+    }
+    if (auto coro = steal_coroutine(processor); coro)
+    {
+        return coro;
+    }
+    if (auto coros = processor->iocontext.poll(false); !coros.empty())
+    {
+        auto coro = static_cast<Handle>(coros.pop_front());
+        bool need_spinning = !coros.empty();
+        add_coro_to_processor(std::move(coros), processor);
+        if (need_spinning)
         {
-            if (coros = processor->iocontext.poll(false); coros.size() > 1)
-            {
-                more = true;
-            }
+            spinning_processors_count_.fetch_add(1);
+            make_spinning();
         }
+        return static_cast<Handle>(coro);
     }
-    if (coros.empty())
-    {
-        return {};
-    }
-    coro = coros.front();
-    add_coro_to_processor({coros.begin() + 1, coros.end()}, processor);
-    if (more)
-    {
-        spinning_processors_count_.fetch_add(1);
-        need_spinning();
-    }
-    return coro;
+    return {};
 }
 
-inline void Scheduler::add_global_coroutine(std::span<Handle> coros)
+inline void Scheduler::add_global_coroutine(IntrusiveList coros)
 {
+
     std::lock_guard<Lock> lock(global_coros_mtx_);
-    global_coros_.insert(global_coros_.end(), coros.begin(), coros.end());
-    global_coros_count_.fetch_add(coros.size());
+    global_coros_.push_back(std::move(coros));
 }
-inline auto Scheduler::get_global_coroutine(size_t max_count) -> std::vector<Handle>
+
+inline auto Scheduler::get_global_coroutine(size_t max_count) -> IntrusiveList
 {
-    if (global_coros_count_.load(std::memory_order::relaxed) == 0)
-    {
-        return {};
-    }
-    std::vector<Handle> coros;
     std::lock_guard<Lock> lock(global_coros_mtx_);
+
     auto get_coros_size = std::min(std::min(global_coros_.size() / max_procs + 1, global_coros_.size()), max_count);
-    coros.reserve(get_coros_size);
-    coros.insert(coros.end(), global_coros_.begin(), global_coros_.begin() + get_coros_size);
-    global_coros_.erase(global_coros_.begin(), global_coros_.begin() + get_coros_size);
-    global_coros_count_.fetch_sub(get_coros_size);
-    return coros;
+    auto result = global_coros_.pop_front(get_coros_size);
+
+    return result;
 }
 
-inline auto Scheduler::steal_coroutine(Processor* processor) -> std::vector<Handle>
+inline auto Scheduler::steal_coroutine(Processor* processor) -> Handle
 {
     int rand_idx = randomer_.random(0, max_procs);
     // TODO:多几轮
@@ -445,9 +489,9 @@ inline auto Scheduler::steal_coroutine(Processor* processor) -> std::vector<Hand
             }
             while (!steal_processor->coros.empty())
             {
-                if (auto coros = steal_processor->coros.pop_front_half(); !coros.empty())
+                if (auto coro = processor->coros.steal(steal_processor->coros); coro)
                 {
-                    return coros;
+                    return coro;
                 }
             }
         }
@@ -463,15 +507,15 @@ inline auto Scheduler::steal_coroutine(Processor* processor) -> std::vector<Hand
 
         if (auto coro = steal_processor->run_next.exchange({}); coro)
         {
-            return {coro};
+            return coro;
         }
     }
     return {};
 }
 inline bool Scheduler::can_spinning()
 {
-    // 先考虑need_spinning_
-    if (need_spinning_.exchange(false))
+    // 先考虑make_spinning_
+    if (make_spinning_.exchange(false))
     {
         return true;
     }
@@ -495,4 +539,98 @@ inline void Scheduler::wake_from_idle(Processor* p)
     p->thread = std::thread([p, this]() { processor_func(p); });
 }
 inline void Scheduler::wake_from_polling(Processor* p) { p->iocontext.wake(); }
+
+inline auto WorkStealingDeque::push_back(IntrusiveList items) -> IntrusiveList
+{
+    auto count = items.size();
+    if (count == 0)
+        return {};
+
+    size_t b = bottom_.load(std::memory_order_acquire);
+    size_t t = top_.load(std::memory_order_acquire);
+    size_t res_count = std::min(Capacity - (b - t), count);
+
+    for (size_t i = 0; i < res_count; ++i)
+    {
+        buffer_[(b + i) & Mask].store(static_cast<Handle>(items.pop_front()), std::memory_order_relaxed);
+    }
+
+    bottom_.store(b + res_count, std::memory_order_release);
+    return items;
+}
+
+inline auto WorkStealingDeque::pop_front() -> Handle
+{
+    size_t t = top_.load(std::memory_order_acquire);
+    size_t b = bottom_.load(std::memory_order_acquire);
+    if (t >= b)
+        return {};
+
+    auto item = buffer_[t & Mask].load(std::memory_order_relaxed);
+    size_t expected = t;
+    auto new_top = t + 1;
+    if (!top_.compare_exchange_strong(expected, new_top, std::memory_order_release, std::memory_order_relaxed))
+    {
+        return Handle{};
+    }
+    return item;
+}
+
+inline auto WorkStealingDeque::pop_front_half() -> IntrusiveList
+{
+    size_t t = top_.load(std::memory_order_acquire);
+    size_t b = bottom_.load(std::memory_order_acquire);
+    if (t >= b)
+        return {};
+
+    size_t steal_count = (b - t + 1) / 2;
+
+    IntrusiveList out;
+    // 读取数据
+    for (size_t i = 0; i < steal_count; ++i)
+    {
+        out.push_back(buffer_[(t + i) & Mask].load(std::memory_order_relaxed));
+    }
+
+    // 原子推进 top
+    size_t expected = t;
+    auto new_top = t + steal_count;
+    if (!top_.compare_exchange_strong(expected, new_top, std::memory_order_release, std::memory_order_relaxed))
+    {
+        return {};
+    }
+    return out;
+}
+
+inline auto WorkStealingDeque::steal(WorkStealingDeque& other) -> Handle
+{
+    assert(empty());
+    size_t other_t = other.top_.load(std::memory_order_acquire);
+    size_t other_b = other.bottom_.load(std::memory_order_acquire);
+    if (other_t >= other_b)
+        return {};
+
+    size_t steal_count = (other_b - other_t + 1) / 2;
+
+    size_t b = bottom_.load(std::memory_order_acquire);
+    // 取第一个
+    auto handle = other.buffer_[other_t & Mask].load(std::memory_order_relaxed);
+    // 窃取剩余数据
+    for (size_t i = 1; i < steal_count; ++i)
+    {
+        auto item = other.buffer_[(other_t + i) & Mask].load(std::memory_order_relaxed);
+        buffer_[(b + i - 1) & Mask].store(item, std::memory_order_relaxed);
+    }
+
+    // 原子推进 top
+    size_t expected = other_t;
+    auto new_top = other_t + steal_count;
+    if (!other.top_.compare_exchange_strong(expected, new_top, std::memory_order_release, std::memory_order_relaxed))
+    {
+        return {};
+    }
+    // 推进 bottom
+    bottom_.fetch_add(steal_count - 1, std::memory_order_release);
+    return handle;
+}
 } // namespace utils

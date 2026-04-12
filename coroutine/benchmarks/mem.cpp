@@ -28,11 +28,11 @@ auto main_coro() -> MainCoroutine
     size_t beforeAlloc = get_mem_sys_bytes();
     WaitGroup wg;
     auto count = 1000;
-    Channel<> ch;
+    Channel<void, 0> ch;
     for (int i = 0; i < count; i++)
     {
         wg.add(1);
-        co_spawn([](Channel<>& ch, WaitGroup& wg) -> Coroutine<> {
+        co_spawn([](Channel<void, 0>& ch, WaitGroup& wg) -> Coroutine<> {
             wg.done();
             co_await ch.send();
         }(ch, wg));

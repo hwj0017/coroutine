@@ -45,3 +45,21 @@ target_sources(testtime PRIVATE testtime.cpp)
 target_include_directories(testtime PRIVATE ../include)
 target_link_libraries(testtime PRIVATE coroutine)
 
+
+add_executable(test_mutex_full)
+target_sources(test_mutex_full PRIVATE testmutex_full.cpp)
+target_include_directories(test_mutex_full PRIVATE ../include)
+target_link_libraries(test_mutex_full PRIVATE coroutine)
+
+
+add_executable(test_channel_full)
+target_sources(test_channel_full PRIVATE testchannel_full.cpp)
+target_include_directories(test_channel_full PRIVATE ../include)
+target_link_libraries(test_channel_full PRIVATE coroutine)
+
+
+add_executable(test_scheduler_full)
+target_sources(test_scheduler_full PRIVATE testscheduler_full.cpp)
+target_include_directories(test_scheduler_full PRIVATE ../include)
+target_link_libraries(test_scheduler_full PRIVATE coroutine)
+

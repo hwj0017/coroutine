@@ -1,5 +1,6 @@
 #pragma once
 #include "coroutine/cospawn.h"
+#include "coroutine/intrusivelist.h"
 #include <atomic>
 #include <cassert>
 #include <coroutine>
@@ -30,7 +31,7 @@ class FinalAwaiter
     bool await_ready() const noexcept { return false; }
     template <typename P> auto await_suspend(std::coroutine_handle<P> handle) const noexcept -> std::coroutine_handle<>
     {
-        auto promise = handle.promise();
+        auto& promise = handle.promise();
         auto awaiter = promise.awaiter_;
         if (!awaiter)
         {
@@ -46,7 +47,7 @@ class FinalAwaiter
 };
 
 class CoroutineBase;
-class Promise
+class Promise : public IntrusiveListNode
 {
   public:
     Promise() = default;
@@ -80,9 +81,6 @@ class Promise
 
   protected:
     CoroutineBase* awaiter_{nullptr};
-    // 用于实现侵入式链表
-    Promise* next_{};
-    friend class CoroQueue;
     friend class FinalAwaiter;
 };
 class CoroutineBase
@@ -175,8 +173,7 @@ template <> class Coroutine<void> : public CoroutineBase
     void await_resume() {}
 };
 
-inline auto Coroutine<>::promise_type::get_return_object() -> Coroutine<void> { return Coroutine<void>(this); }
-
+inline auto Coroutine<void>::promise_type::get_return_object() -> Coroutine<void> { return Coroutine<void>(this); }
 class MainFinalAwaiter
 {
   public:
@@ -184,14 +181,18 @@ class MainFinalAwaiter
     bool await_ready() const noexcept { return false; }
     template <typename P> auto await_suspend(std::coroutine_handle<P> handle) const noexcept
     {
+        // 先读取值，后销毁
+        int value = handle.promise().value_;
         handle.destroy();
-        std::exit(value_); // 直接退出程序，或者根据需要执行其他清理逻辑
+        std::exit(value); // 直接退出程序，或者根据需要执行其他清理逻辑
     }
     void await_resume() const noexcept {}
 
   private:
     int value_;
 };
+
+// 仅仅用于 main 协程的特殊类型，final_suspend 会直接退出程序
 class MainCoroutine : public CoroutineBase
 {
   public:
@@ -208,45 +209,5 @@ class MainCoroutine : public CoroutineBase
     void await_resume() {}
 };
 inline auto MainCoroutine::promise_type::get_return_object() -> MainCoroutine { return MainCoroutine(this); }
-// 侵入式链表
-class CoroQueue
-{
-  private:
-    Promise* head_{};
-    Promise* tail_{};
-    size_t size_{};
 
-  public:
-    CoroQueue() = default;
-    void push(Promise* promise)
-    {
-        if (tail_)
-        {
-            tail_->next_ = promise;
-        }
-        else
-        {
-            head_ = promise;
-        }
-        tail_ = promise;
-        ++size_;
-    }
-    Promise* pop()
-    {
-        if (!head_)
-        {
-            return nullptr;
-        }
-        auto promise = head_;
-        head_ = head_->next_;
-        if (!head_)
-        {
-            tail_ = nullptr;
-        }
-        --size_;
-        return promise;
-    }
-    bool empty() const { return size_ == 0; }
-    size_t size() const { return size_; }
-};
 } // namespace utils

@@ -18,11 +18,11 @@ template <class T> void do_not_optimize(T&& val) { asm volatile("" : : "g"(val) 
 // 测试单次上下文切换 + Channel 发送/接收的开销
 auto benchmark_ping_pong(int n) -> Coroutine<>
 {
-    auto chan_a = Channel<>(0); // 无缓冲 channel
-    auto chan_b = Channel<>(0);
+    auto chan_a = Channel<void, 0>(0); // 无缓冲 channel
+    auto chan_b = Channel<void, 0>(0);
 
     // 启动对端协程
-    co_spawn([](int n, Channel<>& a, Channel<>& b) -> Coroutine<> {
+    co_spawn([](int n, Channel<void, 0>& a, Channel<void, 0>& b) -> Coroutine<> {
         for (int i = 0; i < n; ++i)
         {
             co_await a.recv();

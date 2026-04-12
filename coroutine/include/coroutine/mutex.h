@@ -1,6 +1,7 @@
 #pragma once
 #include "coroutine/coroutine.h"
 #include "coroutine/cospawn.h"
+#include "coroutine/intrusivelist.h"
 #include "coroutine/syscall.h"
 #include <atomic>
 #include <deque>
@@ -28,7 +29,7 @@ class Mutex
 
     std::mutex mtx_;
     bool locked_ = false;
-    std::deque<Awaiter*> waiters_;
+    IntrusiveList waiters_;
     friend class ConditionVariable;
 };
 
@@ -44,10 +45,10 @@ class ConditionVariable
   private:
     bool wait_impl(WaitAwaiter& awaiter);
     Mutex& mutex_;
-    std::deque<WaitAwaiter*> waiters_;
+    IntrusiveList waiters_;
 };
 
-class Mutex::Awaiter
+class Mutex::Awaiter : public IntrusiveListNode
 {
   public:
     Awaiter(Mutex& m) : m_(m) {}
@@ -188,8 +189,7 @@ inline void Mutex::unlock()
 
     while (!waiters_.empty())
     {
-        awaiter_to_resume = waiters_.front();
-        waiters_.pop_front();
+        awaiter_to_resume = static_cast<Awaiter*>(waiters_.pop_front());
 
         locked_ = true; // 试探性地把锁移交给这个协程
         mtx_.unlock();  // 必须在此处释放自旋锁，防止 Predicate 里的业务代码死锁！
@@ -268,7 +268,7 @@ inline void ConditionVariable::notify_all()
             return;
         }
 
-        mutex_.waiters_.insert(mutex_.waiters_.end(), waiters_.begin(), waiters_.end());
+        mutex_.waiters_.push_back(std::move(waiters_));
         waiters_.clear();
 
         if (!mutex_.locked_)

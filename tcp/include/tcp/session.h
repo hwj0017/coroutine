@@ -10,8 +10,9 @@ namespace utils
 class RpcSession : public std::enable_shared_from_this<RpcSession>
 {
   private:
+    constexpr static size_t Capacity = 1024;
     Socket socket_;
-    Channel<std::string> send_channel_;
+    Channel<std::string, Capacity> send_channel_;
     // 私有的写协程
     static Coroutine<> write_loop(std::shared_ptr<RpcSession> session)
     {

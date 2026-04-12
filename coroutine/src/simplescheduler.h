@@ -1,5 +1,6 @@
 #pragma once
 #include "coroutine/coroutine.h"
+#include "coroutine/intrusivelist.h"
 #include "iocontext.h"
 #include <atomic>
 #include <cstddef>
@@ -13,14 +14,8 @@ class SimpleScheduler
   public:
     SimpleScheduler() = default;
     ~SimpleScheduler() = default;
-    void co_spawn(Handle coro, bool yield = false) { coros_.push(coro); }
-    void co_spawn(std::vector<Handle>&& coro)
-    {
-        for (auto& coro : coro)
-        {
-            coros_.push(coro);
-        }
-    }
+    void co_spawn(Handle coro, bool yield = false) { coros_.push_back(coro); }
+    void co_spawn(IntrusiveList coros) { coros_.push_back(std::move(coros)); }
     auto& get_io_context() { return iocontext_; }
     void schedule()
     {
@@ -30,9 +25,8 @@ class SimpleScheduler
             size_t resume_count = 0;
             while (!is_stopped_ && !coros_.empty())
             {
-                auto coro = coros_.front();
-                coros_.pop();
-                coro->resume();
+                auto coro = coros_.pop_front();
+                static_cast<Promise*>(coro)->resume();
                 if (iocontext_.has_work() && ++resume_count >= poll_interval)
                 {
 
@@ -59,7 +53,7 @@ class SimpleScheduler
     }
 
   private:
-    std::queue<Handle> coros_;
+    IntrusiveList coros_;
     std::atomic<bool> is_stopped_ = false;
     IOContext iocontext_;
 };

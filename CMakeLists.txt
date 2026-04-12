@@ -17,7 +17,7 @@ set(CMAKE_CXX_FLAGS_DEBUG "-g")
 set(CMAKE_CXX_FLAGS_RELEASE "-g -O3 -DNDEBUG")
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    # message(STATUS "Enable AddressSanitizer (ASan)")
+    # # message(STATUS "Enable AddressSanitizer (ASan)")
 
     # # 1. 增加编译选项
     # add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)

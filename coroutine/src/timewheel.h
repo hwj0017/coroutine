@@ -1,6 +1,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <list>
 #include <vector>
 
@@ -20,7 +21,6 @@ struct WheelLevel
     uint64_t slot_mask;
     uint64_t shift;
     uint64_t total_range;
-
     WheelLevel(size_t bits, uint64_t accumulated_shift)
         : slots(1ULL << bits),
           // 如果槽位 < 64，只需要 1 个 uint64_t；如果是 256，需要 4 个 uint64_t

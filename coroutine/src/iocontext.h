@@ -1,6 +1,7 @@
 #pragma once
 
 #include "coroutine/coroutine.h"
+#include "coroutine/intrusivelist.h"
 #include "coroutine/syscall.h"
 #include "timewheel.h"
 #include <array>
@@ -32,7 +33,7 @@ class IOContext
         // 包含eventfd的IO操作
         return event_count_ > 1;
     }
-    auto poll(bool block) -> std::vector<Handle>
+    auto poll(bool block) -> IntrusiveList
     {
         assert(event_count_ > 0);
         // 提交所有未提交的IO操作，降低延迟
@@ -67,7 +68,7 @@ class IOContext
             }
         }
 
-        std::vector<Handle> coroutines;
+        IntrusiveList coroutines;
         int finished_count = 0;
         unsigned head;
         struct io_uring_cqe* cqe;

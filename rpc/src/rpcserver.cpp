@@ -99,6 +99,7 @@ struct RpcServer::Impl
         {
             session->close();
         }
+        // std::print(std::cout, "id:{}\n", msg.header.get_sequence_id());
     }
 };
 
