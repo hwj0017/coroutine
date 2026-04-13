@@ -387,15 +387,15 @@ inline auto Scheduler::get_coro_from_processor(Processor* processor) -> Handle
     {
         return coro;
     }
-    // // 多次后，考虑从全局队列获取
-    // constexpr int interval = 61;
-    // if (processor->local_count_ % interval == 0)
-    // {
-    //     if (auto coros = get_global_coroutine(1); !coros.empty())
-    //     {
-    //         return coros.front();
-    //     }
-    // }
+    // 多次后，考虑从全局队列获取
+    constexpr int interval = 61;
+    if (processor->local_count_ % interval == 0)
+    {
+        if (auto coros = get_global_coroutine(1); !coros.empty())
+        {
+            return static_cast<Handle>(coros.front());
+        }
+    }
     // 需要重试保证本地队列取完
     while (!processor->coros.empty())
     {
