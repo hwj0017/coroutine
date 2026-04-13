@@ -243,7 +243,7 @@ inline auto Scheduler::get_coro() -> Handle
             }
 
             // 从掩码中删除
-            running_mask_.fetch_and(~(1 << processor->id));
+            running_mask_.fetch_and(~(1ULL << processor->id));
             if (can_spinning())
             {
                 processor->state = Processor::State::SPINNING;
@@ -251,7 +251,7 @@ inline auto Scheduler::get_coro() -> Handle
             else
             {
                 // 阻塞监听io
-                polling_mask_.fetch_or(1 << processor->id);
+                polling_mask_.fetch_or(1ULL << processor->id);
                 processor->state = Processor::State::POLLING;
             }
             break;
@@ -262,7 +262,7 @@ inline auto Scheduler::get_coro() -> Handle
             if (coro)
             {
                 processor->state = Processor::State::RUNNING;
-                running_mask_.fetch_or(1 << processor->id);
+                running_mask_.fetch_or(1ULL << processor->id);
                 return coro;
             }
             if (last_spinning)
@@ -271,12 +271,12 @@ inline auto Scheduler::get_coro() -> Handle
                 if (coro = get_coro_with_spinning(processor); coro)
                 {
                     processor->state = Processor::State::RUNNING;
-                    running_mask_.fetch_or(1 << processor->id);
+                    running_mask_.fetch_or(1ULL << processor->id);
                     return coro;
                 }
             }
             // 阻塞监听io
-            polling_mask_.fetch_or(1 << processor->id);
+            polling_mask_.fetch_or(1ULL << processor->id);
             processor->state = Processor::State::POLLING;
             break;
         }
@@ -284,7 +284,7 @@ inline auto Scheduler::get_coro() -> Handle
             // // 防止所有P同时POLLING导致饿死
             if (make_spinning_.exchange(false))
             {
-                polling_mask_.fetch_and(~(1 << processor->id));
+                polling_mask_.fetch_and(~(1ULL << processor->id));
                 processor->state = Processor::State::SPINNING;
                 break;
             }
@@ -296,7 +296,7 @@ inline auto Scheduler::get_coro() -> Handle
                 // 考虑自旋
                 if (can_spinning())
                 {
-                    polling_mask_.fetch_and(~(1 << processor->id));
+                    polling_mask_.fetch_and(~(1ULL << processor->id));
                     processor->state = Processor::State::SPINNING;
                 }
                 break;
@@ -307,8 +307,8 @@ inline auto Scheduler::get_coro() -> Handle
             add_coro_to_processor(std::move(coros), processor);
             // 转化成运行态
             processor->state = Processor::State::RUNNING;
-            polling_mask_.fetch_and(~(1 << processor->id));
-            running_mask_.fetch_or(1 << processor->id);
+            polling_mask_.fetch_and(~(1ULL << processor->id));
+            running_mask_.fetch_or(1ULL << processor->id);
             return static_cast<Handle>(coro);
         }
         }
@@ -320,7 +320,7 @@ inline void Scheduler::make_spinning()
     if (auto mask = polling_mask_.load(std::memory_order::relaxed); mask)
     {
         auto low_1bit = mask & -mask;
-        auto index = __builtin_ctz(low_1bit);
+        auto index = __builtin_ctzll(low_1bit);
         wake_from_polling(processors_[index].get());
         return;
     }

@@ -25,6 +25,7 @@ class RpcClient
 
     auto join()
     {
+        ::shutdown(socket_.fd(), SHUT_RDWR);
         socket_.close();
         pending_.close();
         return wg_.wait();

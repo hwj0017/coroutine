@@ -3,6 +3,7 @@
 #include "coroutine/coroutine.h"
 #include <ctime>
 #include <fcntl.h>
+#include <print>
 #include <string_view>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -11,11 +12,23 @@
 namespace utils
 {
 
+enum class SysCallType
+{
+    CONNECT,
+    ACCEPT,
+    READ,
+    WRITE,
+    RECV,
+    SEND,
+    DELAY
+};
 class IOContext;
 template <typename T> bool process(T* awaiter);
-class SysAwaiterBase
+class SysAwaiterBase : public IntrusiveListNode
 {
   public:
+    SysAwaiterBase(SysCallType type) : type_(type) {}
+
     bool await_ready() const noexcept { return false; }
     int await_resume() const noexcept { return result_; }
     virtual auto set_value(int result) -> Promise*
@@ -25,6 +38,7 @@ class SysAwaiterBase
     }
 
   protected:
+    SysCallType type_;
     int result_{0};
     Promise* promise_{nullptr};
     friend class IOContext;
@@ -32,6 +46,7 @@ class SysAwaiterBase
 template <typename T> class SysAwaiter : public SysAwaiterBase
 {
   public:
+    SysAwaiter(SysCallType type) : SysAwaiterBase(type) {}
     ~SysAwaiter() = default;
     template <typename Promise> bool await_suspend(std::coroutine_handle<Promise> handle) noexcept
     {
@@ -44,7 +59,7 @@ class ConnectAwaiter : public SysAwaiter<ConnectAwaiter>
 {
   public:
     ConnectAwaiter(int sockfd, const sockaddr* addr, socklen_t addrlen)
-        : sockfd_(sockfd), addr_(addr), addrlen_(addrlen)
+        : SysAwaiter(SysCallType::CONNECT), sockfd_(sockfd), addr_(addr), addrlen_(addrlen)
     {
     }
 
@@ -57,7 +72,10 @@ class ConnectAwaiter : public SysAwaiter<ConnectAwaiter>
 class AcceptAwaiter : public SysAwaiter<AcceptAwaiter>
 {
   public:
-    AcceptAwaiter(int sockfd, sockaddr* addr, socklen_t* addrlen) : sockfd_(sockfd), addr_(addr), addrlen_(addrlen) {}
+    AcceptAwaiter(int sockfd, sockaddr* addr, socklen_t* addrlen)
+        : SysAwaiter(SysCallType::ACCEPT), sockfd_(sockfd), addr_(addr), addrlen_(addrlen)
+    {
+    }
 
   private:
     int sockfd_;
@@ -69,7 +87,9 @@ class AcceptAwaiter : public SysAwaiter<AcceptAwaiter>
 class ReadAwaiter : public SysAwaiter<ReadAwaiter>
 {
   public:
-    ReadAwaiter(int fd, void* buf, size_t nbytes) : fd_(fd), buf_(buf), nbytes_(nbytes) {}
+    ReadAwaiter(int fd, void* buf, size_t nbytes) : SysAwaiter(SysCallType::READ), fd_(fd), buf_(buf), nbytes_(nbytes)
+    {
+    }
 
   protected:
     int fd_;
@@ -95,7 +115,10 @@ class FileReadAwaiter : public ReadAwaiter
 class WriteAwaiter : public SysAwaiter<WriteAwaiter>
 {
   public:
-    WriteAwaiter(int fd, const void* buf, size_t nbytes) : fd_(fd), buf_(buf), nbytes_(nbytes) {}
+    WriteAwaiter(int fd, const void* buf, size_t nbytes)
+        : SysAwaiter(SysCallType::WRITE), fd_(fd), buf_(buf), nbytes_(nbytes)
+    {
+    }
     auto set_value(int result) -> Promise* override
     {
         if (result <= 0)
@@ -122,29 +145,55 @@ class WriteAwaiter : public SysAwaiter<WriteAwaiter>
     friend class IOContext;
 };
 
-class RecvAwaiter : public ReadAwaiter
+class RecvAwaiter : public SysAwaiter<RecvAwaiter>
 {
   public:
-    RecvAwaiter(int fd, void* buf, size_t nbytes, int flags) : ReadAwaiter(fd, buf, nbytes), flags_(flags)
+    RecvAwaiter(int fd, void* buf, size_t nbytes, int flags)
+        : SysAwaiter(SysCallType::RECV), fd_(fd), buf_(buf), nbytes_(nbytes), flags_(flags)
     {
-        flags_ = flags & ~MSG_DONTWAIT;
+        // flags_ = flags & ~MSG_DONTWAIT;
     }
 
   private:
+    int fd_;
+    void* buf_;
+    size_t nbytes_;
     int flags_;
     friend class IOContext;
 };
-class SendAwaiter : public WriteAwaiter
+class SendAwaiter : public SysAwaiter<SendAwaiter>
 {
   public:
-    SendAwaiter(int fd, const void* buf, size_t nbytes, int flags) : WriteAwaiter(fd, buf, nbytes), flags_(flags)
+    SendAwaiter(int fd, const void* buf, size_t nbytes, int flags)
+        : SysAwaiter(SysCallType::SEND), fd_(fd), buf_(buf), nbytes_(nbytes), flags_(flags)
     {
         // 1. 强制添加 MSG_NOSIGNAL，防止对端关闭时崩溃
         // 2. 屏蔽 MSG_DONTWAIT
         flags_ = (flags | MSG_NOSIGNAL) & ~MSG_DONTWAIT;
     }
+    auto set_value(int result) -> Promise* override
+    {
+        if (result <= 0)
+        {
+            return promise_;
+        }
+        // 如果是部分写入，继续写剩余数据
+        buf_ = static_cast<const char*>(buf_) + result;
+        nbytes_ -= result;
+        result_ += result;
+        if (nbytes_ == 0)
+        {
+            return promise_;
+        }
+        process(this);
+        return nullptr; // 不立即恢复，等待下一次写入完成
+        // return SysAwaiterBase::set_value(result);
+    }
 
   private:
+    int fd_;
+    const void* buf_;
+    size_t nbytes_;
     int flags_;
     friend class IOContext;
 };
@@ -152,7 +201,7 @@ class SendAwaiter : public WriteAwaiter
 class DelayAwaiter : public SysAwaiter<DelayAwaiter>
 {
   public:
-    DelayAwaiter(double timeout) : timeout_(timeout) {}
+    DelayAwaiter(double timeout) : SysAwaiter(SysCallType::DELAY), timeout_(timeout) {}
 
   private:
     double timeout_;

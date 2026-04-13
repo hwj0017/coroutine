@@ -69,6 +69,7 @@ struct RpcServer::Impl
             auto n = co_await session->recv(buffer.writable_span(bytes_to_read));
             if (n <= 0)
             {
+                std::cout << "connection closed" << std::endl;
                 break; // 对端关闭或出错
             }
             buffer.commit_write(n);

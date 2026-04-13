@@ -25,5 +25,7 @@ template bool process(AcceptAwaiter* awaiter);
 template bool process(DelayAwaiter* awaiter);
 template bool process(ReadAwaiter* awaiter);
 template bool process(WriteAwaiter* awaiter);
+template bool process(RecvAwaiter* awaiter);
+template bool process(SendAwaiter* awaiter);
 
 } // namespace utils

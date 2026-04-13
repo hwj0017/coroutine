@@ -23,6 +23,7 @@ namespace utils
 {
 using Handle = Promise*;
 class Scheduler;
+// TODO:不要使用计数来计算SQ的数量
 class IOContext
 {
   public:
@@ -98,15 +99,15 @@ class IOContext
             // 处理pending的函数
             while (event_count_ < entries && !pending_call_.empty())
             {
-                auto func = pending_call_.front();
-                pending_call_.pop();
-                func();
+                auto awaiter = pending_call_.pop_front();
+                process_impl(static_cast<SysAwaiterBase*>(awaiter));
             }
         }
         auto ready = timer_wheel_.update();
         for (auto timer : ready)
         {
             auto handle = static_cast<DelayAwaiter*>(timer)->set_value(0);
+            assert(handle);
             coroutines.push_back(handle);
         }
         return coroutines;
@@ -132,11 +133,13 @@ class IOContext
     constexpr static size_t entries = 1024;
     io_uring ring_;
     int eventfd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    // eventfd_ read 的缓冲区
+
     uint64_t eventfd_buf_ = 0;
     ReadAwaiter eventfd_awaiter_{eventfd_, &eventfd_buf_, 8};
+
     BitwiseTimerWheel timer_wheel_{MS(1), std::vector<size_t>{8, 6, 6, 6, 6}};
-    // eventfd_ read 的缓冲区
-    std::queue<std::function<void()>> pending_call_{};
+    IntrusiveList pending_call_{};
     size_t event_count_ = 0;
     size_t unsubmitted_count_ = 0;
     friend class Scheduler;
@@ -146,7 +149,9 @@ inline IOContext::IOContext()
 {
     auto res = io_uring_queue_init(entries, &ring_, 0);
     assert(res >= 0);
-    eventfd_awaiter_ = {eventfd_, &eventfd_buf_, 8};
+    eventfd_awaiter_.fd_ = eventfd_;
+    eventfd_awaiter_.buf_ = &eventfd_buf_;
+    eventfd_awaiter_.nbytes_ = sizeof(eventfd_buf_);
     process(&eventfd_awaiter_);
 }
 
@@ -155,9 +160,15 @@ template <typename Awaiter>
 bool IOContext::process(Awaiter* awaiter)
     requires(std::is_base_of_v<SysAwaiterBase, Awaiter>)
 {
+    if constexpr (std::is_same_v<DelayAwaiter, Awaiter>)
+    {
+        awaiter = static_cast<DelayAwaiter*>(awaiter);
+        timer_wheel_.add_timer(MS(size_t(awaiter->timeout_ * 1000)), awaiter);
+        return true;
+    }
     if (event_count_ >= entries)
     {
-        pending_call_.push([this, awaiter]() { process_impl(awaiter); });
+        pending_call_.push_back(awaiter);
         return true;
     }
     process_impl(awaiter);
@@ -167,52 +178,88 @@ template <typename Awaiter>
 bool IOContext::process_impl(Awaiter* awaiter)
     requires(std::is_base_of_v<SysAwaiterBase, Awaiter>)
 {
-    if constexpr (std::is_same_v<DelayAwaiter, Awaiter>)
+    if constexpr (std::is_same_v<SysAwaiterBase, Awaiter>)
     {
-        awaiter = static_cast<DelayAwaiter*>(awaiter);
-        timer_wheel_.add_timer(MS(size_t(awaiter->timeout_ * 1000)), awaiter);
-        return true;
+        awaiter = static_cast<SysAwaiterBase*>(awaiter);
+        switch (awaiter->type_)
+        {
+        case SysCallType::CONNECT: {
+            process_impl(static_cast<ConnectAwaiter*>(awaiter));
+            break;
+        }
+        case SysCallType::ACCEPT: {
+            process_impl(static_cast<AcceptAwaiter*>(awaiter));
+            break;
+        }
+        case SysCallType::READ: {
+            process_impl(static_cast<ReadAwaiter*>(awaiter));
+            break;
+        }
+        case SysCallType::WRITE: {
+            process_impl(static_cast<WriteAwaiter*>(awaiter));
+            break;
+        }
+        case SysCallType::RECV: {
+            process_impl(static_cast<RecvAwaiter*>(awaiter));
+            break;
+        }
+        case SysCallType::SEND: {
+            process_impl(static_cast<SendAwaiter*>(awaiter));
+            break;
+        }
+        default: {
+            assert(false);
+            break;
+        }
+        }
     }
+
     auto sqe = io_uring_get_sqe(&ring_);
+    // TODO:没有空余的SQE了，应该有更好的处理方式
     assert(sqe);
     // 如果Syscall是AcceptAwaiter，则调用accept()
     if constexpr (std::is_same_v<AcceptAwaiter, Awaiter>)
     {
-        awaiter = static_cast<AcceptAwaiter*>(awaiter);
-        io_uring_prep_accept(sqe, awaiter->sockfd_, awaiter->addr_, awaiter->addrlen_, 0);
+        auto accept_awaiter = static_cast<AcceptAwaiter*>(awaiter);
+        io_uring_prep_accept(sqe, accept_awaiter->sockfd_, accept_awaiter->addr_, accept_awaiter->addrlen_, 0);
     }
     else if constexpr (std::is_same_v<ConnectAwaiter, Awaiter>)
     {
-        awaiter = static_cast<ConnectAwaiter*>(awaiter);
-        io_uring_prep_connect(sqe, awaiter->sockfd_, awaiter->addr_, awaiter->addrlen_);
+        auto connect_awaiter = static_cast<ConnectAwaiter*>(awaiter);
+        io_uring_prep_connect(sqe, connect_awaiter->sockfd_, connect_awaiter->addr_, connect_awaiter->addrlen_);
     }
     else if constexpr (std::is_same_v<ReadAwaiter, Awaiter>)
     {
-        awaiter = static_cast<ReadAwaiter*>(awaiter);
-        io_uring_prep_read(sqe, awaiter->fd_, awaiter->buf_, awaiter->nbytes_, 0);
+        auto read_awaiter = static_cast<ReadAwaiter*>(awaiter);
+        io_uring_prep_read(sqe, read_awaiter->fd_, read_awaiter->buf_, read_awaiter->nbytes_, 0);
     }
     else if constexpr (std::is_same_v<WriteAwaiter, Awaiter>)
     {
-        awaiter = static_cast<WriteAwaiter*>(awaiter);
-        io_uring_prep_write(sqe, awaiter->fd_, awaiter->buf_, awaiter->nbytes_, 0);
+        auto write_awaiter = static_cast<WriteAwaiter*>(awaiter);
+        io_uring_prep_write(sqe, write_awaiter->fd_, write_awaiter->buf_, write_awaiter->nbytes_, 0);
     }
     else if constexpr (std::is_same_v<RecvAwaiter, Awaiter>)
     {
-        awaiter = static_cast<RecvAwaiter*>(awaiter);
-        io_uring_prep_recv(sqe, awaiter->fd_, awaiter->buf_, awaiter->nbytes_, awaiter->flags_);
+        auto recv_awaiter = static_cast<RecvAwaiter*>(awaiter);
+        io_uring_prep_recv(sqe, recv_awaiter->fd_, recv_awaiter->buf_, recv_awaiter->nbytes_, recv_awaiter->flags_);
     }
     else if constexpr (std::is_same_v<SendAwaiter, Awaiter>)
     {
-        constexpr size_t ZC_THRESHOLD = 16384;
-        awaiter = static_cast<SendAwaiter*>(awaiter);
-        if (awaiter->nbytes_ < ZC_THRESHOLD)
-        {
-            io_uring_prep_send(sqe, awaiter->fd_, awaiter->buf_, awaiter->nbytes_, awaiter->flags_);
-        }
-        else
-        {
-            io_uring_prep_send_zc(sqe, awaiter->fd_, awaiter->buf_, awaiter->nbytes_, awaiter->flags_);
-        }
+        // TODO: 需要6.0 才支持零拷贝发送
+        // constexpr size_t ZC_THRESHOLD = 16384;
+        // auto send_awaiter = static_cast<SendAwaiter*>(awaiter);
+        // if (send_awaiter->nbytes_ < ZC_THRESHOLD)
+        // {
+        //     io_uring_prep_send(sqe, send_awaiter->fd_, send_awaiter->buf_, send_awaiter->nbytes_,
+        //     send_awaiter->flags_);
+        // }
+        // else
+        // {
+        //     io_uring_prep_send_zc(sqe, send_awaiter->fd_, send_awaiter->buf_, send_awaiter->nbytes_,
+        //                           send_awaiter->flags_, 0);
+        // }
+        auto send_awaiter = static_cast<SendAwaiter*>(awaiter);
+        io_uring_prep_send(sqe, send_awaiter->fd_, send_awaiter->buf_, send_awaiter->nbytes_, send_awaiter->flags_);
     }
 
     // 先设置请求在设置user_data

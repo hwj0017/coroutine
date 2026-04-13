@@ -39,7 +39,7 @@ auto RpcClient::write_worker() -> Coroutine<>
 
         auto str = msg.string();
         auto count = co_await socket_.send(str);
-        if (count < 0)
+        if (count <= 0)
         {
             break;
         }

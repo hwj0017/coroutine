@@ -115,9 +115,9 @@ void print_report(size_t size_bytes, int conc, double duration_s, BenchResult& r
 auto main_coro() -> MainCoroutine
 {
     // 测试维度配置
-    std::vector<size_t> payload_sizes = {64, 1024, 16384, 131072}; // 64B, 1K, 16K, 128K
-    std::vector<int> concurrency_levels = {1, 10, 100, 1000};      // 并发阶梯
-    const int TEST_SAMPLES = 20000;                                // 每个组合的总请求数
+    std::vector<size_t> payload_sizes = {64, 1024, 16384, 128 * 1024}; // 64B, 1K, 16K, 128K
+    std::vector<int> concurrency_levels = {1, 10, 100, 1000};          // 并发阶梯
+    const int TEST_SAMPLES = 20000;                                    // 每个组合的总请求数
 
     RpcClient client("127.0.0.1", 8888);
     BenchResult result;
