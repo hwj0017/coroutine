@@ -24,7 +24,7 @@ class RpcSession : public std::enable_shared_from_this<RpcSession>
                 break;
             }
 
-            auto count = co_await session->socket_.write(data);
+            auto count = co_await session->socket_.send(data);
             if (count < 0)
             {
                 break;
@@ -36,7 +36,7 @@ class RpcSession : public std::enable_shared_from_this<RpcSession>
   public:
     explicit RpcSession(Socket sock) : socket_(std::move(sock)) {}
     void start() { co_spawn(write_loop(shared_from_this())); }
-    auto read(std::span<char> buffer) { return socket_.read(buffer); }
+    auto recv(std::span<char> buffer) { return socket_.recv(buffer); }
     // TODO 实现一个发送缓存
     auto send(std::string data) { return send_channel_.send(std::move(data)); }
     void close()

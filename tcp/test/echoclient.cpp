@@ -136,7 +136,7 @@ class EchoClientTest
             }
 
             // 发送消息
-            auto res = co_await socket.write(message.c_str(), message.length());
+            auto res = co_await socket.send(message.c_str(), message.length());
             if (res < 0)
             {
                 if (config_.verbose)
@@ -149,7 +149,7 @@ class EchoClientTest
             total_bytes_.fetch_add(res);
 
             // 读取响应
-            if (auto read_res = co_await socket.read(buffer); read_res < 0)
+            if (auto read_res = co_await socket.recv(buffer); read_res < 0)
             {
                 if (config_.verbose)
                 {

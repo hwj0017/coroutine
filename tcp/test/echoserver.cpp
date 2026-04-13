@@ -13,10 +13,10 @@ auto echo(utils::Socket conn) -> utils::Coroutine<>
     std::array<char, buffer_size> buffer;
     while (true)
     {
-        if (auto n = co_await conn.read(buffer); n > 0)
+        if (auto n = co_await conn.recv(buffer); n > 0)
         {
             std::cout << "received " << n << " bytes" << std::endl;
-            co_await conn.write({buffer.data(), static_cast<size_t>(n)});
+            co_await conn.send({buffer.data(), static_cast<size_t>(n)});
         }
         else
         {

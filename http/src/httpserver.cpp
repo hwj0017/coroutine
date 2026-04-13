@@ -201,7 +201,7 @@ auto HttpServer::handle_http_connection(Socket tcp_conn) -> Coroutine<>
         buffer.resize(old_size + 4096);
 
         // 2. 直接读到 vector 的尾部空闲区域！完全没有 temp_buffer 的拷贝！
-        auto n = co_await tcp_conn.read(buffer.data() + old_size, 4096);
+        auto n = co_await tcp_conn.recv(buffer.data() + old_size, 4096);
 
         if (n <= 0)
         {
@@ -219,7 +219,7 @@ auto HttpServer::handle_http_connection(Socket tcp_conn) -> Coroutine<>
             if (result == HttpParser::ParseResult::error)
             {
                 std::string resp = "HTTP/1.1 400 Bad Request\r\n\r\n";
-                co_await tcp_conn.write(resp.data(), resp.size());
+                co_await tcp_conn.send(resp.data(), resp.size());
                 co_return;
             }
 
@@ -233,7 +233,7 @@ auto HttpServer::handle_http_connection(Socket tcp_conn) -> Coroutine<>
             if (!handler)
             {
                 std::string resp = "HTTP/1.1 404 Not Found\r\n\r\n";
-                co_await tcp_conn.write(resp);
+                co_await tcp_conn.send(resp);
             }
             else
             {
@@ -243,7 +243,7 @@ auto HttpServer::handle_http_connection(Socket tcp_conn) -> Coroutine<>
                 ctx.set_middlewares(std::move(middlewares));
 
                 co_await ctx.run();
-                co_await tcp_conn.write(ctx.response().message());
+                co_await tcp_conn.send(ctx.response().message());
             }
             buffer.clear();
 

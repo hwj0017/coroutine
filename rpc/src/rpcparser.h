@@ -3,80 +3,114 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+
 namespace utils
 {
 class RpcParser
 {
+  public:
+    enum class State
+    {
+        ExpectHeader,
+        ExpectBody
+    };
+
   private:
-    // 安全防御：限制单次 RPC 调用的最大负载为 16MB，防止恶意发超大包撑爆内存
     static constexpr uint32_t MAX_META_SIZE = 1024;
     static constexpr uint32_t MAX_BODY_SIZE = 16 * 1024 * 1024;
 
-    size_t consumed_bytes_{0}; // 记录上一次成功解析消耗了多少字节
+    State state_{State::ExpectHeader};
+    // 记录当前正在解析的包的长度信息，避免重复计算
+    uint32_t method_len_{0};
+    uint32_t body_len_{0};
+    size_t consumed_bytes_{0};
 
   public:
     RpcParser() = default;
-    // 获取消耗的字节数，供外部从缓冲区中抹除
+
+    auto get_state() const -> State { return state_; }
     size_t get_consumed_bytes() const { return consumed_bytes_; }
+    size_t get_expected_bytes() const
+    {
+        if (state_ == State::ExpectHeader)
+        {
+            return sizeof(RpcHeader);
+        }
+        else
+        {
+            // 如果 Header 已经解析完成，期望长度就是整个包的真实长度
+            return sizeof(RpcHeader) + method_len_ + body_len_;
+        }
+    }
+    void reset()
+    {
+        state_ = State::ExpectHeader;
+        consumed_bytes_ = 0;
+        method_len_ = 0;
+        body_len_ = 0;
+    }
 
-    // 重置状态
-    void reset() { consumed_bytes_ = 0; }
-
-    // 核心解析逻辑
     RpcParseResult parse(std::span<char> buffer, RpcMessage& out_msg)
     {
-        // 1. 检查是否连 Header 的长度都不够
-        if (buffer.size() < sizeof(RpcHeader))
+        consumed_bytes_ = 0;
+
+        // --- 阶段 1：解析并填充 Header ---
+        if (state_ == State::ExpectHeader)
         {
-            return RpcParseResult::Incomplete;
+            if (buffer.size() < sizeof(RpcHeader))
+            {
+                return RpcParseResult::Incomplete;
+            }
+
+            const RpcHeader* raw_header = reinterpret_cast<const RpcHeader*>(buffer.data());
+
+            // 1. 校验魔数
+            if (raw_header->get_magic() != RpcHeader::EXPECTED_MAGIC)
+            {
+                return RpcParseResult::Error;
+            }
+
+            // 2. 直接写入目标对象 out_msg
+            out_msg.header = *raw_header;
+            method_len_ = out_msg.header.get_method_length();
+            body_len_ = out_msg.header.get_body_length();
+
+            // 3. 安全校验
+            if (method_len_ > MAX_META_SIZE || body_len_ > MAX_BODY_SIZE)
+            {
+                return RpcParseResult::Error;
+            }
+
+            state_ = State::ExpectBody;
         }
 
-        // 2. 提取 Header 并转换大端序
-        const RpcHeader* raw_header = reinterpret_cast<const RpcHeader*>(buffer.data());
-
-        // 校验魔数
-        uint16_t magic = raw_header->get_magic();
-        if (magic != RpcHeader::EXPECTED_MAGIC)
+        // --- 阶段 2：基于已填充的 Header 解析 Body ---
+        if (state_ == State::ExpectBody)
         {
-            return RpcParseResult::Error;
+            size_t total_packet_size = sizeof(RpcHeader) + method_len_ + body_len_;
+
+            if (buffer.size() < total_packet_size)
+            {
+                // 虽然 Header 已经填进去了，但数据没够，告诉外部还需要更多数据
+                return RpcParseResult::Incomplete;
+            }
+
+            // 4. 解析 Method (Payload 1)
+            const char* method_ptr = buffer.data() + sizeof(RpcHeader);
+            out_msg.method.assign(method_ptr, method_len_);
+
+            // 5. 解析 Body (Payload 2)
+            const char* body_ptr = method_ptr + method_len_;
+            out_msg.payload.assign(body_ptr, body_len_);
+
+            consumed_bytes_ = total_packet_size;
+
+            // 成功解析完一个整包，重置状态以便解析下一个
+            state_ = State::ExpectHeader;
+            return RpcParseResult::Success;
         }
 
-        // 3. 提取两个长度字段
-        uint32_t method_len = raw_header->get_method_length();
-        uint32_t body_len = raw_header->get_body_length();
-
-        // 安全校验：防止 OOM 攻击
-        if (method_len > MAX_META_SIZE || body_len > MAX_BODY_SIZE)
-        {
-            return RpcParseResult::Error;
-        }
-
-        // 4. 计算总长度：Header + Meta + Body
-        size_t total_packet_size = sizeof(RpcHeader) + method_len + body_len;
-
-        // 5. 检查缓冲区数据是否足够
-        if (buffer.size() < total_packet_size)
-        {
-            return RpcParseResult::Incomplete;
-        }
-
-        // --- 逻辑分水岭：数据已完整 ---
-
-        // 6. 填充 Header 到输出对象
-        out_msg.header = *raw_header;
-
-        // 7. 解析 method
-        const char* method_ptr = buffer.data() + sizeof(RpcHeader);
-        out_msg.method.assign(method_ptr, method_len);
-
-        // 8. 提取 Body (Payload)
-        const char* body_ptr = method_ptr + method_len;
-        out_msg.payload.assign(body_ptr, body_len);
-
-        // 9. 更新消耗字节数
-        consumed_bytes_ = total_packet_size;
-
-        return RpcParseResult::Success;
+        return RpcParseResult::Incomplete;
     }
 };
 } // namespace utils

@@ -16,15 +16,6 @@ template <typename T> bool process(T* awaiter);
 class SysAwaiterBase
 {
   public:
-    enum class Type
-    {
-        None,
-        Write,
-        Read,
-        Delay,
-        Accept,
-        Connect
-    };
     bool await_ready() const noexcept { return false; }
     int await_resume() const noexcept { return result_; }
     virtual auto set_value(int result) -> Promise*
@@ -35,7 +26,6 @@ class SysAwaiterBase
 
   protected:
     int result_{0};
-    Type type{SysAwaiterBase::Type::None};
     Promise* promise_{nullptr};
     friend class IOContext;
 };
@@ -67,10 +57,7 @@ class ConnectAwaiter : public SysAwaiter<ConnectAwaiter>
 class AcceptAwaiter : public SysAwaiter<AcceptAwaiter>
 {
   public:
-    AcceptAwaiter(int sockfd, sockaddr* addr, socklen_t* addrlen) : sockfd_(sockfd), addr_(addr), addrlen_(addrlen)
-    {
-        type = Type::Accept;
-    }
+    AcceptAwaiter(int sockfd, sockaddr* addr, socklen_t* addrlen) : sockfd_(sockfd), addr_(addr), addrlen_(addrlen) {}
 
   private:
     int sockfd_;
@@ -82,7 +69,7 @@ class AcceptAwaiter : public SysAwaiter<AcceptAwaiter>
 class ReadAwaiter : public SysAwaiter<ReadAwaiter>
 {
   public:
-    ReadAwaiter(int fd, void* buf, size_t nbytes) : fd_(fd), buf_(buf), nbytes_(nbytes) { type = Type::Read; }
+    ReadAwaiter(int fd, void* buf, size_t nbytes) : fd_(fd), buf_(buf), nbytes_(nbytes) {}
 
   protected:
     int fd_;
@@ -108,7 +95,7 @@ class FileReadAwaiter : public ReadAwaiter
 class WriteAwaiter : public SysAwaiter<WriteAwaiter>
 {
   public:
-    WriteAwaiter(int fd, const void* buf, size_t nbytes) : fd_(fd), buf_(buf), nbytes_(nbytes) { type = Type::Write; }
+    WriteAwaiter(int fd, const void* buf, size_t nbytes) : fd_(fd), buf_(buf), nbytes_(nbytes) {}
     auto set_value(int result) -> Promise* override
     {
         if (result <= 0)
@@ -135,10 +122,37 @@ class WriteAwaiter : public SysAwaiter<WriteAwaiter>
     friend class IOContext;
 };
 
+class RecvAwaiter : public ReadAwaiter
+{
+  public:
+    RecvAwaiter(int fd, void* buf, size_t nbytes, int flags) : ReadAwaiter(fd, buf, nbytes), flags_(flags)
+    {
+        flags_ = flags & ~MSG_DONTWAIT;
+    }
+
+  private:
+    int flags_;
+    friend class IOContext;
+};
+class SendAwaiter : public WriteAwaiter
+{
+  public:
+    SendAwaiter(int fd, const void* buf, size_t nbytes, int flags) : WriteAwaiter(fd, buf, nbytes), flags_(flags)
+    {
+        // 1. 强制添加 MSG_NOSIGNAL，防止对端关闭时崩溃
+        // 2. 屏蔽 MSG_DONTWAIT
+        flags_ = (flags | MSG_NOSIGNAL) & ~MSG_DONTWAIT;
+    }
+
+  private:
+    int flags_;
+    friend class IOContext;
+};
+
 class DelayAwaiter : public SysAwaiter<DelayAwaiter>
 {
   public:
-    DelayAwaiter(double timeout) : timeout_(timeout) { type = Type::Delay; }
+    DelayAwaiter(double timeout) : timeout_(timeout) {}
 
   private:
     double timeout_;
@@ -160,5 +174,11 @@ inline auto read(std::string_view file_name, void* buf, size_t nbytes)
 }
 inline auto write(int fd, const void* buf, size_t nbytes) noexcept { return WriteAwaiter(fd, buf, nbytes); }
 
+inline auto recv(int fd, void* buf, size_t nbytes, int flags) noexcept { return RecvAwaiter(fd, buf, nbytes, flags); }
+
+inline auto send(int fd, const void* buf, size_t nbytes, int flags) noexcept
+{
+    return SendAwaiter(fd, buf, nbytes, flags);
+}
 inline auto delay(int timeout_ms) noexcept { return DelayAwaiter(timeout_ms); }
 } // namespace utils

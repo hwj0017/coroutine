@@ -86,11 +86,17 @@ class Socket
         return utils::connect(fd_, addr.get_sockaddr(), addr.get_socklen());
     }
 
-    auto read(void* buf, size_t nbytes) noexcept { return ::utils::read(fd_, buf, nbytes); }
+    auto recv(void* buf, size_t nbytes, int flags = 0) noexcept { return ::utils::recv(fd_, buf, nbytes, flags); }
 
-    auto read(std::span<char> buffer) noexcept { return ::utils::read(fd_, buffer.data(), buffer.size()); }
-    auto write(const void* buf, size_t nbytes) noexcept { return ::utils::write(fd_, buf, nbytes); }
-    auto write(std::span<const char> buffer) noexcept { return ::utils::write(fd_, buffer.data(), buffer.size()); }
+    auto recv(std::span<char> buffer, int flags = 0) noexcept
+    {
+        return ::utils::recv(fd_, buffer.data(), buffer.size(), flags);
+    }
+    auto send(const void* buf, size_t nbytes, int flags = 0) noexcept { return ::utils::send(fd_, buf, nbytes, flags); }
+    auto send(std::span<const char> buffer, int flags = 0) noexcept
+    {
+        return ::utils::send(fd_, buffer.data(), buffer.size(), flags);
+    }
     // ==========================================================
     // Accept Awaiter：直接组装并返回包含完整地址信息的 Socket
     // ==========================================================

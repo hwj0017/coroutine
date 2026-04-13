@@ -196,6 +196,24 @@ bool IOContext::process_impl(Awaiter* awaiter)
         awaiter = static_cast<WriteAwaiter*>(awaiter);
         io_uring_prep_write(sqe, awaiter->fd_, awaiter->buf_, awaiter->nbytes_, 0);
     }
+    else if constexpr (std::is_same_v<RecvAwaiter, Awaiter>)
+    {
+        awaiter = static_cast<RecvAwaiter*>(awaiter);
+        io_uring_prep_recv(sqe, awaiter->fd_, awaiter->buf_, awaiter->nbytes_, awaiter->flags_);
+    }
+    else if constexpr (std::is_same_v<SendAwaiter, Awaiter>)
+    {
+        constexpr size_t ZC_THRESHOLD = 16384;
+        awaiter = static_cast<SendAwaiter*>(awaiter);
+        if (awaiter->nbytes_ < ZC_THRESHOLD)
+        {
+            io_uring_prep_send(sqe, awaiter->fd_, awaiter->buf_, awaiter->nbytes_, awaiter->flags_);
+        }
+        else
+        {
+            io_uring_prep_send_zc(sqe, awaiter->fd_, awaiter->buf_, awaiter->nbytes_, awaiter->flags_);
+        }
+    }
 
     // 先设置请求在设置user_data
     sqe->user_data = reinterpret_cast<uintptr_t>(awaiter);
